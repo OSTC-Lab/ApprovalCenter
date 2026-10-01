@@ -1,0 +1,12 @@
+services:
+  approval_center:
+    image: ghcr.io/ostc-lab/approval-center:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8731:8731"
+    volumes:
+      - ./config.toml:/config/config.toml:ro
+      - data:/data
+
+volumes:
+  data:
