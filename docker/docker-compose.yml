@@ -1,6 +1,6 @@
 services:
   approval_center:
-    image: ghcr.io/ostc-lab/approval-center:latest
+    image: ghcr.io/ostc-lab/approvalcenter:master
     restart: unless-stopped
     ports:
       - "127.0.0.1:8731:8731"

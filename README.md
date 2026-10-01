@@ -18,11 +18,28 @@ Clients create approvals through HTTP, reviewers make decisions through Discord 
 FastAPI, the Discord bot, and periodic maintenance run in one process.
 They share the approval service and SQLite database.
 
-```text
-Client HTTP request -> Approval service -> SQLite
-Discord interaction -> Approval service -> SQLite
-Periodic maintenance -> Approval service + Discord message synchronization
-Client polling -> Approval service -> HTTP response
+```mermaid
+flowchart LR
+    client["HTTP client"]
+    reviewers["Reviewers"]
+    platform["Discord"]
+    database[("SQLite")]
+
+    subgraph center["ApprovalCenter (single process)"]
+        api["HTTP API"]
+        service["Approval service"]
+        bot["Discord bot"]
+        maintenance["Periodic maintenance"]
+    end
+
+    client <-->|Create, poll, replace data| api
+    api <-->|Operations and results| service
+    service <-->|Persist and query| database
+    reviewers -->|Approve or reject| platform
+    platform <-->|Cards and interactions| bot
+    bot -->|Submit decision| service
+    maintenance -->|Timeouts, cleanup, sync state| service
+    maintenance -->|Publish or update cards| bot
 ```
 
 ### Clients and reviewers
@@ -81,7 +98,7 @@ Clients are responsible for executing approved operations and matching their exe
 ### Requirements
 
 - Python 3.13 or later and [uv](https://docs.astral.sh/uv/) for source deployment.
-- Docker with BuildKit and Docker Compose v2 for container deployment.
+- Docker for container deployment; Docker Compose v2 for the supplied template.
 - A Discord bot with access to the configured server and approval channel.
 
 The bot needs View Channel, Send Messages, Embed Links, and Read Message History permissions.
@@ -106,63 +123,14 @@ Edit `config.toml` to supply the bot token, Discord IDs, reviewer rules, and cli
 The default configuration path is `config.toml`.
 Relative database paths resolve against the configuration file's directory. Configuration changes require a restart.
 
-### Docker Compose
+### Docker deployment
 
-The Dockerfile follows the [uv Docker integration guide](https://docs.astral.sh/uv/guides/integration/docker/).
-It pins uv, installs locked production dependencies in a cached build stage,
-and copies the virtual environment and source into a Python runtime image.
-The project uses `package = false`; startup invokes Python directly.
+Image: `ghcr.io/ostc-lab/approvalcenter:master` (`linux/amd64`).
 
-Create the configuration:
+Mount `config.toml` at `/config/config.toml` and persist `/data`.
+Set `service.host` to `0.0.0.0` and `service.database` to `/data/approval_center.sqlite3`.
 
-```bash
-cp config.example.toml config.toml
-```
-
-Supply the Discord and client credentials. For container deployment, configure the service section as follows:
-
-```toml
-[service]
-host = "0.0.0.0"
-port = 8731
-database = "/data/approval_center.sqlite3"
-```
-
-The container listens on all container interfaces.
-Compose publishes the HTTP port on the host's loopback address, `127.0.0.1:8731`.
-
-```bash
-docker compose up -d --build
-docker compose logs -f approval-center
-```
-
-Compose mounts `config.toml` read-only at `/config/config.toml` and stores SQLite files in the `approval-data` named
-volume at `/data`. The container runs as root.
-
-Restart after configuration changes, rebuild after source or dependency changes, and stop with:
-
-```bash
-docker compose restart approval-center
-docker compose up -d --build
-docker compose down
-```
-
-`docker compose down` preserves the database volume. Adding `--volumes` deletes it.
-
-### Docker without Compose
-
-```bash
-docker build -f docker/Dockerfile -t approval-center .
-docker volume create approval-center-data
-docker run -d --name approval-center \
-  --restart unless-stopped \
-  -p 127.0.0.1:8731:8731 \
-  --mount type=bind,src="$(pwd)/config.toml",dst=/config/config.toml,readonly \
-  --mount type=volume,src=approval-center-data,dst=/data \
-  approval-center
-```
-
-Use the same container configuration values shown above.
+A minimal [Docker Compose template](docker/docker-compose.yml) is available to copy and adapt for deployment.
 
 ### Operation and development
 
