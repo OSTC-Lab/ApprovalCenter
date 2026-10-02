@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from typing import override
 from urllib.parse import unquote, urlsplit
 
 import discord
@@ -19,6 +20,7 @@ class _ProxyAuthConnector(TCPConnector):
 		super().__init__(limit=0)
 		self._proxy_authorization = authorization
 
+	@override
 	async def connect(self, req: ClientRequest, traces: list[Trace], timeout: ClientTimeout) -> Connection:
 		# discord.py has no proxy_headers option. Apply authentication to its shared connector.
 		if req.proxy is not None:
@@ -72,9 +74,11 @@ class DecisionButton(discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]],
 		))
 
 	@classmethod
+	@override
 	async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Item, match: re.Match[str]) -> 'DecisionButton':
 		return cls(int(match['approval_id']), ApprovalStatus(match['decision']))
 
+	@override
 	async def callback(self, interaction: discord.Interaction) -> None:
 		# Acknowledge before current-role lookup or database work.
 		await interaction.response.defer(ephemeral=True, thinking=True)
@@ -113,6 +117,7 @@ class ApprovalBot(discord.Client):
 		self._active_handlers: set[asyncio.Task[object]] = set()
 		self.add_dynamic_items(DecisionButton)
 
+	@override
 	async def _async_setup_hook(self) -> None:
 		await super()._async_setup_hook()
 		if self._proxy_authorization is not None:
@@ -146,6 +151,7 @@ class ApprovalBot(discord.Client):
 			if task is not None:
 				self._active_handlers.discard(task)
 
+	@override
 	async def close(self) -> None:
 		self._closing = True
 		tasks = tuple(self._active_handlers)

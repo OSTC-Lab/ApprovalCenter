@@ -9,7 +9,7 @@ import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, override
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
@@ -65,6 +65,7 @@ def make_client(client_id: str, *, is_admin: bool = False, enabled: bool = True)
 
 
 class ApprovalFixture(unittest.IsolatedAsyncioTestCase):
+	@override
 	async def asyncSetUp(self) -> None:
 		self.temp = tempfile.TemporaryDirectory()
 		self.path = Path(self.temp.name) / 'center.sqlite3'
@@ -84,6 +85,7 @@ class ApprovalFixture(unittest.IsolatedAsyncioTestCase):
 		self.publisher = FakePublisher()
 		self.maintenance = Maintenance(self.service, self.publisher, self.config)
 
+	@override
 	async def asyncTearDown(self) -> None:
 		await self.storage.close()
 		self.temp.cleanup()
@@ -400,12 +402,14 @@ class ApprovalTests(ApprovalFixture):
 
 
 class ApiTests(ApprovalFixture):
+	@override
 	async def asyncSetUp(self) -> None:
 		await super().asyncSetUp()
 		self.app = FastAPI()
 		install_api(self.app, self.config, lambda: self.service, lambda: RuntimeHealth(True, True))
 		self.http = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app, raise_app_exceptions=False), base_url='http://test', auth=('owner', 'secret'))
 
+	@override
 	async def asyncTearDown(self) -> None:
 		await self.http.aclose()
 		await super().asyncTearDown()

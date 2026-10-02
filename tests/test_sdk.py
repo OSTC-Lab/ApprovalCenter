@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from functools import partial
 from pathlib import Path
+from typing import override
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
@@ -26,6 +27,7 @@ ASYNC_HTTP_CLIENT = httpx.AsyncClient
 
 
 class SdkTests(unittest.TestCase):
+	@override
 	def setUp(self) -> None:
 		self.requests: list[httpx.Request] = []
 		self.responses: list[httpx.Response] = []
@@ -161,6 +163,7 @@ class SdkTests(unittest.TestCase):
 
 
 class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
+	@override
 	async def asyncSetUp(self) -> None:
 		self.temp = tempfile.TemporaryDirectory()
 		self.storage = await Storage.open(Path(self.temp.name) / 'test.sqlite3')
@@ -176,6 +179,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 		self.app = FastAPI()
 		api.install_api(self.app, self.config, lambda: self.service, lambda: api.RuntimeHealth(True, True))
 
+	@override
 	async def asyncTearDown(self) -> None:
 		await self.storage.close()
 		self.temp.cleanup()
