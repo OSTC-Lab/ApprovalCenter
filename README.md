@@ -133,8 +133,8 @@ Relative database paths resolve against the configuration file's directory. Conf
 
 Image: `ghcr.io/ostc-lab/approvalcenter:master` (`linux/amd64`).
 
+Use [config.docker.toml](config.docker.toml) as the template for `config.toml` and fill in the credentials and Discord IDs.
 Mount `config.toml` at `/config/config.toml` and persist `/data`.
-Set `service.host` to `0.0.0.0` and `service.database` to `/data/approval_center.sqlite3`.
 
 A minimal [Docker Compose template](docker/docker-compose.yml) is available to copy and adapt for deployment.
 

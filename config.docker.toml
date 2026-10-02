@@ -1,0 +1,35 @@
+[service]
+host = "0.0.0.0"
+port = 8731
+database = "/data/approval_center.sqlite3"
+
+[discord]
+token = "REPLACE_WITH_BOT_TOKEN"
+# proxy_url = "http://proxy:7890"
+guild_id = "123456789012345678"
+channel_id = "123456789012345679"
+reviewer_ids = ["123456789012345680"]
+reviewer_role_ids = []
+
+[[clients]]
+client_id = "primebackup"
+client_secret = "REPLACE_WITH_CLIENT_SECRET"
+display_name = "PrimeBackup"
+enabled = true
+is_admin = false
+
+[[clients]]
+client_id = "debug"
+client_secret = "REPLACE_WITH_ADMIN_SECRET"
+display_name = "Debug"
+enabled = false
+is_admin = true
+
+[policy]
+maintenance_interval = 5
+max_approval_seconds = 604800
+retention_seconds = 15552000
+max_data_bytes = 1048576
+
+[logging]
+level = "INFO"
