@@ -181,6 +181,7 @@ Container deployments use `/data/approval_center.sqlite3`. The database parent d
 | Field               | Type         | Default  | Description                        |
 |---------------------|--------------|----------|------------------------------------|
 | `token`             | string       | Required | Non-empty bot token                |
+| `proxy_url`         | string       | Omitted  | Optional `http://` proxy URL       |
 | `guild_id`          | string       | Required | Discord server ID                  |
 | `channel_id`        | string       | Required | Approval text channel or thread ID |
 | `reviewer_ids`      | string array | `[]`     | Eligible reviewer user IDs         |
@@ -188,6 +189,17 @@ Container deployments use `/data/approval_center.sqlite3`. The database parent d
 
 At least one reviewer list must be non-empty. Current membership and roles are checked when a user makes a decision.
 Each approval stores its destination server and channel; changing configuration does not migrate existing cards.
+
+Omit `proxy_url` to connect directly. To use an HTTP proxy, set it under `[discord]`, for example
+`proxy_url = "http://127.0.0.1:7890"`. Authentication is supported with
+`http://username:password@host:port`; percent-encode reserved characters in credentials.
+The URL must have a host and an optional port, with no path other than `/`, query, or fragment.
+Empty values and proxy schemes other than `http://` are rejected.
+
+The proxy must support CONNECT for Discord HTTPS and Gateway WebSocket connections.
+When configured, all bot REST requests, Gateway connections, interaction acknowledgements and follow-up replies,
+and library CDN downloads use this proxy. Proxy failures never fall back to a direct connection.
+System proxy environment variables are not used. Proxy URLs are stored as secrets; restart the service after changing them.
 
 ### Clients
 

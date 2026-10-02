@@ -1,13 +1,31 @@
 import asyncio
 import logging
 import re
+from urllib.parse import unquote, urlsplit
 
 import discord
+from aiohttp import ClientRequest, ClientTimeout, TCPConnector, encode_basic_auth
+from aiohttp.connector import Connection
+from aiohttp.tracing import Trace
 
 from approval_center.approval import ApprovalError, ApprovalService, ApprovalStatus, MessageSnapshot, MessageSyncResult
 from approval_center.config import DiscordConfig
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _ProxyAuthConnector(TCPConnector):
+	def __init__(self, authorization: str):
+		super().__init__(limit=0)
+		self._proxy_authorization = authorization
+
+	async def connect(self, req: ClientRequest, traces: list[Trace], timeout: ClientTimeout) -> Connection:
+		# discord.py has no proxy_headers option. Apply authentication to its shared connector.
+		if req.proxy is not None:
+			headers = dict(req.proxy_headers or {})
+			headers['Proxy-Authorization'] = self._proxy_authorization
+			req.update_proxy(req.proxy, None, headers)
+		return await super().connect(req, traces, timeout)
 
 
 def status_text(status: ApprovalStatus) -> str:
@@ -78,13 +96,27 @@ class ApprovalBot(discord.Client):
 	def __init__(self, config: DiscordConfig, service: ApprovalService):
 		intents = discord.Intents.none()
 		intents.guilds = True
-		super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
+		proxy = config.proxy_url.get_secret_value() if config.proxy_url is not None else None
+		proxy_authorization = None
+		if proxy is not None:
+			address = urlsplit(proxy)
+			if address.username is not None:
+				proxy_authorization = encode_basic_auth(unquote(address.username), unquote(address.password or ''))
+				# Keep credentials out of proxy URLs included in aiohttp exceptions.
+				proxy = address._replace(netloc=address.netloc.rsplit('@', 1)[-1]).geturl()
+		super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none(), proxy=proxy)
+		self._proxy_authorization = proxy_authorization
 		self.config = config
 		self.service = service
 		self._connected_once = False
 		self._closing = False
 		self._active_handlers: set[asyncio.Task[object]] = set()
 		self.add_dynamic_items(DecisionButton)
+
+	async def _async_setup_hook(self) -> None:
+		await super()._async_setup_hook()
+		if self._proxy_authorization is not None:
+			self.http.connector = _ProxyAuthConnector(self._proxy_authorization)
 
 	@property
 	def ready(self) -> bool:

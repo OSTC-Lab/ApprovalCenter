@@ -2,8 +2,9 @@ import logging
 import tomllib
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
 
 Snowflake = Annotated[str, Field(pattern=r'^[1-9][0-9]{0,19}$')]
 
@@ -20,10 +21,30 @@ class ServiceConfig(ConfigModel):
 
 class DiscordConfig(ConfigModel):
 	token: SecretStr
+	proxy_url: SecretStr | None = None
 	guild_id: Snowflake
 	channel_id: Snowflake
 	reviewer_ids: list[Snowflake] = Field(default_factory=list)
 	reviewer_role_ids: list[Snowflake] = Field(default_factory=list)
+
+	@field_validator('proxy_url')
+	@classmethod
+	def validate_proxy_url(cls, value: SecretStr | None) -> SecretStr | None:
+		if value is None:
+			return None
+		url = value.get_secret_value()
+		if not url.lower().startswith('http://') or any(character.isspace() or ord(character) < 32 for character in url):
+			raise ValueError('Discord proxy_url must be an http:// proxy URL')
+		try:
+			proxy = AnyHttpUrl(url)
+			address = urlsplit(url)
+		except (ValidationError, ValueError):
+			raise ValueError('Discord proxy_url must have a valid host and port') from None
+		if proxy.port == 0 or address.netloc.endswith(':'):
+			raise ValueError('Discord proxy_url port must be between 1 and 65535')
+		if address.path not in ('', '/') or proxy.query is not None or proxy.fragment is not None:
+			raise ValueError('Discord proxy_url must not contain a path, query or fragment')
+		return SecretStr(str(proxy))
 
 	@model_validator(mode='after')
 	def validate_credentials(self) -> 'DiscordConfig':
