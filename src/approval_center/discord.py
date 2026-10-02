@@ -44,6 +44,16 @@ def status_text(status: ApprovalStatus) -> str:
 			return '已取消'
 
 
+def render_message_content(snapshot: MessageSnapshot) -> str:
+	approval = snapshot.approval
+	# Timestamp markup renders in message content, but not in embed footer text.
+	content = f'截止时间：<t:{approval.expires_at}:F>（<t:{approval.expires_at}:R>）'
+	if approval.decided_at is not None:
+		label = '取消时间' if approval.status == ApprovalStatus.CANCELLED else '决定时间'
+		content += f'\n{label}：<t:{approval.decided_at}:F>'
+	return content
+
+
 def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
 	approval = snapshot.approval
 	color = {
@@ -57,10 +67,7 @@ def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
 	embed.set_author(name=display_name)
 	for field in approval.content.fields:
 		embed.add_field(name=field.name, value=field.value, inline=field.inline)
-	footer = f'单号：{approval.approval_id} | 状态：{status_text(approval.status)} | 截止时间：{approval.expires_at}'
-	if approval.decided_at is not None:
-		label = '取消时间' if approval.status == ApprovalStatus.CANCELLED else '决定时间'
-		footer += f' | {label}：{approval.decided_at}'
+	footer = f'单号：{approval.approval_id} | 状态：{status_text(approval.status)}'
 	if approval.reviewer_id is not None:
 		footer += f' | 审批人：{approval.reviewer_id}'
 	embed.set_footer(text=footer)
@@ -88,7 +95,7 @@ class DecisionButton(discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]],
 		await interaction.response.defer(ephemeral=True, thinking=True)
 		client = interaction.client
 		if not isinstance(client, ApprovalBot):
-			await interaction.followup.send('审批服务暂时不可用。', ephemeral=True)
+			await interaction.followup.send(f'审批单 {self.approval_id} 的审批服务暂时不可用。', ephemeral=True)
 			return
 		await client.handle_decision(interaction, self.approval_id, self.decision)
 
@@ -168,39 +175,40 @@ class ApprovalBot(discord.Client):
 	async def _handle_decision(self, interaction: discord.Interaction, approval_id: int, decision: ApprovalStatus) -> None:
 		try:
 			if interaction.guild is None or interaction.message is None or interaction.channel_id is None:
-				await interaction.followup.send('此位置不支持审批。', ephemeral=True)
+				await interaction.followup.send(f'此位置不支持审批单 {approval_id} 的审批操作。', ephemeral=True)
 				return
 			if str(interaction.guild.id) != self.config.guild_id:
-				await interaction.followup.send('此服务器不支持审批。', ephemeral=True)
+				await interaction.followup.send(f'此服务器不支持审批单 {approval_id} 的审批操作。', ephemeral=True)
 				return
 			if not await self.reviewer_allowed(interaction.guild, interaction.user.id):
-				await interaction.followup.send('你没有审批权限。', ephemeral=True)
+				await interaction.followup.send(f'你没有审批单 {approval_id} 的审批权限。', ephemeral=True)
 				return
 			result = await self.service.decide(
 				approval_id, decision, str(interaction.user.id), str(interaction.guild.id),
 				str(interaction.channel_id), str(interaction.message.id),
 			)
-			text = f'审批完成：{status_text(result.approval.status)}。' if result.accepted else f'该单据已结束：{status_text(result.approval.status)}。'
+			text = f'审批单 {result.approval.approval_id} {status_text(result.approval.status)}。'
 			await interaction.followup.send(text, ephemeral=True)
 		except ApprovalError as error:
-			text = '审批单不存在或已清理。' if error.status_code == 404 else '此卡片未关联到有效审批单。'
+			text = f'审批单 {approval_id} 不存在或已清理。' if error.status_code == 404 else f'审批单 {approval_id} 的卡片关联无效。'
 			await interaction.followup.send(text, ephemeral=True)
 		except Exception:
 			LOGGER.exception('Discord decision failed approval_id=%s reviewer_id=%s', approval_id, interaction.user.id)
-			await interaction.followup.send('审批处理失败，请稍后重试。', ephemeral=True)
+			await interaction.followup.send(f'审批单 {approval_id} 处理失败，请稍后重试。', ephemeral=True)
 
 	async def sync(self, snapshot: MessageSnapshot, display_name: str) -> MessageSyncResult:
 		channel = await self.fetch_channel(int(snapshot.link.channel_id))
 		if not isinstance(channel, (discord.TextChannel, discord.Thread)) or str(channel.guild.id) != snapshot.link.guild_id:
 			raise RuntimeError('Configured approval channel is not a text channel in the expected guild')
 		embed = render_card(snapshot, display_name)
+		content = render_message_content(snapshot)
 		view = card_view(snapshot.approval.approval_id, snapshot.approval.status)
 		if snapshot.link.message_id is None:
-			message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+			message = await channel.send(content=content, embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
 			return MessageSyncResult(str(message.id))
 		try:
 			message = await channel.fetch_message(int(snapshot.link.message_id))
-			await message.edit(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+			await message.edit(content=content, embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
 		except discord.NotFound as error:
 			if error.code != 10008:  # Only an unknown message ends synchronization.
 				raise

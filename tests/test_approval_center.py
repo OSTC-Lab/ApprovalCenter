@@ -22,7 +22,7 @@ from pydantic import SecretStr, ValidationError
 from approval_center.api import RuntimeHealth, install_api
 from approval_center.approval import ApprovalContent, ApprovalError, ApprovalFilter, ApprovalService, ApprovalStatus, DisplayField, MessageSnapshot, MessageSyncResult
 from approval_center.config import ClientConfig, Config, DiscordConfig, PolicyConfig, ServiceConfig, load_config
-from approval_center.discord import ApprovalBot, DecisionButton, card_view, render_card
+from approval_center.discord import ApprovalBot, DecisionButton, card_view, render_card, render_message_content
 from approval_center.maintenance import Maintenance
 from approval_center.runtime import create_app
 from approval_center.storage import Storage
@@ -258,7 +258,7 @@ class ApprovalTests(ApprovalFixture):
 		snapshot = (await self.service.pending_messages())[0]
 		card = render_card(snapshot, 'PrimeBackup')
 		self.assertIn('已取消', card.footer.text)
-		self.assertIn('取消时间：1001', card.footer.text)
+		self.assertIn('取消时间：<t:1001:F>', render_message_content(snapshot))
 		self.assertTrue(all(child.item.disabled for child in card_view(approval.approval_id, cancelled.status).children))
 		await self.maintenance.run_once()
 		self.assertEqual(self.publisher.snapshots[-1].approval.status, ApprovalStatus.CANCELLED)
@@ -479,6 +479,8 @@ class ApprovalTests(ApprovalFixture):
 		self.assertEqual(card.title, self.content.title)
 		self.assertEqual(card.fields[0].value, 'Steve')
 		self.assertIn('待审批', card.footer.text)
+		self.assertNotIn('截止时间', card.footer.text)
+		self.assertEqual(render_message_content(snapshot), '截止时间：<t:1100:F>（<t:1100:R>）')
 		self.assertNotIn(base64.b64encode(snapshot.approval.data).decode(), card.footer.text)
 		view = card_view(1, ApprovalStatus.PENDING)
 		self.assertTrue(view.is_persistent())
@@ -488,6 +490,19 @@ class ApprovalTests(ApprovalFixture):
 		self.assertEqual(restored.approval_id, 1)
 		self.assertEqual(restored.decision, ApprovalStatus.APPROVED)
 		self.assertTrue(all(child.item.disabled for child in card_view(1, ApprovalStatus.APPROVED).children))
+
+	async def test_time_display_preserves_full_content_capacity(self) -> None:
+		self.content = ApprovalContent(
+			title='Approval', description='x' * 4096,
+			fields=tuple(DisplayField(name='Name', value='Value') for _ in range(25)),
+		)
+		await self.create()
+		snapshot = (await self.service.pending_messages())[0]
+		card = render_card(snapshot, 'PrimeBackup')
+		self.assertEqual(card.description, self.content.description)
+		self.assertEqual(len(card.fields), 25)
+		self.assertLessEqual(len(card), 6000)
+		self.assertEqual(render_message_content(snapshot), '截止时间：<t:1100:F>（<t:1100:R>）')
 
 	async def test_current_reviewer_roles_and_no_admin_bypass(self) -> None:
 		bot = ApprovalBot(self.config.discord, self.service)
@@ -536,11 +551,16 @@ class ApprovalTests(ApprovalFixture):
 			snapshot = (await self.service.pending_messages())[0]
 			result = await bot.sync(snapshot, 'PrimeBackup')
 			self.assertEqual(result.message_id, '101')
+			self.assertEqual(channel.send.call_args.kwargs['content'], '截止时间：<t:1100:F>（<t:1100:R>）')
 			await self.service.complete_message_sync(snapshot, result.message_id)
 			await self.service.decide(1, ApprovalStatus.REJECTED, '3', '1', '2', '101')
 			snapshot = (await self.service.pending_messages())[0]
 			await bot.sync(snapshot, 'PrimeBackup')
 			channel.fetch_message.return_value.edit.assert_awaited_once()
+			self.assertEqual(
+				channel.fetch_message.return_value.edit.call_args.kwargs['content'],
+				'截止时间：<t:1100:F>（<t:1100:R>）\n决定时间：<t:1000:F>',
+			)
 			channel.fetch_message.side_effect = discord.NotFound(SimpleNamespace(status=404, reason='Not Found'), {'code': 10008, 'message': 'Unknown Message'})
 			with self.assertLogs('approval_center.discord', level=logging.WARNING):
 				result = await bot.sync(snapshot, 'PrimeBackup')
