@@ -856,6 +856,16 @@ class ApiTests(ApprovalFixture):
 		self.assertEqual(response.json()['code'], 'invalid_status_transition')
 		self.assertEqual((await self.http.get('/api/v1/approval/1')).json()['status'], 'timed_out')
 
+	async def test_admin_page_served_without_credentials(self) -> None:
+		response = await self.http.get('/admin', auth=None)
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.headers['content-type'], 'text/html; charset=utf-8')
+		self.assertEqual(response.headers['cache-control'], 'no-store')
+		page = Path(__file__).resolve().parents[1] / 'src' / 'approval_center' / 'admin.html'
+		self.assertEqual(response.text, page.read_text(encoding='utf-8'))
+		self.assertNotIn('/admin', self.app.openapi()['paths'])
+		self.assertEqual((await self.http.get('/api/v1/approval?all=true', auth=None)).status_code, 401)
+
 	async def test_api_invalid_inputs_and_health(self) -> None:
 		for data in ('!!!', '汉字', 123, None):
 			response = await self.http.post('/api/v1/approval', json={'content': {'title': 'x'}, 'expires_at': 1100, 'data': data})

@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ApprovalCenter 管理</title>
+	<style>
+		:root { color-scheme: light; font-family: system-ui, sans-serif; color: #243244; background: #f3f5f8; }
+		* { box-sizing: border-box; }
+		body { margin: 0; }
+		[hidden] { display: none !important; }
+		button, input, select { font: inherit; }
+		button, input, select { border: 1px solid #cbd3df; border-radius: 6px; padding: 8px 10px; background: white; color: inherit; }
+		button { cursor: pointer; white-space: nowrap; }
+		button:hover:enabled { background: #edf2fa; }
+		button:disabled { opacity: .5; cursor: default; }
+		button.primary { color: white; background: #285ac9; border-color: #285ac9; }
+		button.primary:hover:enabled { background: #204aaa; }
+		:focus-visible { outline: 2px solid #285ac9; outline-offset: 2px; }
+		input, select { min-width: 0; max-width: 100%; }
+		label { display: grid; gap: 6px; font-size: 14px; }
+		fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+		h1, h2, h3, p { margin: 0; }
+		h1 { font-size: 21px; }
+		h2 { font-size: 18px; }
+		h3 { font-size: 15px; margin: 22px 0 12px; }
+		header { background: white; border-bottom: 1px solid #dce2eb; }
+		.topbar { max-width: 1440px; margin: auto; padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+		.session, .actions, .pagination { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+		main { max-width: 1440px; margin: auto; padding: 24px; }
+		.panel { background: white; border: 1px solid #dce2eb; border-radius: 10px; padding: 22px; min-width: 0; }
+		.login { max-width: 430px; margin: 7vh auto 0; }
+		.login fieldset { display: grid; gap: 18px; }
+		.muted { color: #65748a; font-size: 13px; line-height: 1.7; }
+		.message { margin-bottom: 16px; padding: 12px 16px; border-radius: 6px; background: #e8f3ed; color: #17623d; overflow-wrap: anywhere; }
+		.message.error { background: #fceceb; color: #a32620; }
+		.filters { display: grid; gap: 16px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+		.check-label { display: flex; align-items: center; gap: 6px; }
+		.check-label input { margin: 0; }
+		.filter-actions { display: flex; align-items: end; gap: 10px; }
+		.lookup { display: flex; gap: 10px; align-items: end; margin-top: 18px; padding-top: 18px; border-top: 1px solid #e6eaf0; }
+		.lookup input { width: 160px; }
+		.workspace { display: grid; grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr); gap: 20px; margin-top: 20px; align-items: start; }
+		.table-scroll { overflow-x: auto; margin-top: 16px; }
+		table { border-collapse: collapse; width: 100%; font-size: 13px; text-align: left; }
+		th, td { padding: 12px 9px; border-bottom: 1px solid #e6eaf0; vertical-align: top; }
+		th { font-weight: 500; color: #65748a; white-space: nowrap; }
+		td { overflow-wrap: anywhere; }
+		td:first-child { padding-left: 0; }
+		.id-button { color: #285ac9; padding: 3px 5px; }
+		.selected { background: #f0f5ff; }
+		.title-cell { min-width: 130px; max-width: 220px; }
+		.date-cell { min-width: 145px; white-space: nowrap; }
+		.badge { display: inline-block; font-size: 12px; border-radius: 4px; padding: 3px 7px; white-space: nowrap; background: #eef0f3; color: #536071; }
+		.badge.pending { background: #e9efff; color: #2456be; }
+		.badge.approved { background: #e4f4eb; color: #16623c; }
+		.badge.rejected { background: #fceceb; color: #a32620; }
+		.pagination { justify-content: space-between; margin-top: 18px; }
+		dl { display: grid; grid-template-columns: 95px minmax(0, 1fr); gap: 10px 12px; margin: 0; font-size: 14px; }
+		dt { color: #65748a; }
+		dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+		.content-title { font-size: 16px; margin-bottom: 12px; overflow-wrap: anywhere; }
+		.description { margin-bottom: 16px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+		pre { margin: 10px 0 0; padding: 14px; border-radius: 6px; background: #f5f7fa; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 400px; overflow: auto; font-size: 13px; }
+		summary { cursor: pointer; color: #65748a; font-size: 13px; margin-top: 14px; }
+		.status-form { display: flex; gap: 10px; margin-bottom: 10px; }
+		.status-form select { flex: 1; }
+		@media (max-width: 1100px) { .workspace { grid-template-columns: minmax(0, 1fr); } .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+		@media (max-width: 600px) { main { padding: 16px; } .topbar { padding: 16px; flex-wrap: wrap; } .panel { padding: 16px; } .filters { grid-template-columns: minmax(0, 1fr); } }
+	</style>
+</head>
+<body>
+	<header>
+		<div class="topbar">
+			<h1>ApprovalCenter <span class="muted">管理</span></h1>
+			<div id="session" class="session" hidden>
+				<span id="session-name" class="muted"></span>
+				<button id="logout" type="button">退出登录</button>
+			</div>
+		</div>
+	</header>
+	<main>
+		<div id="message" class="message" role="status" aria-live="polite" hidden></div>
+		<section id="login" class="panel login">
+			<form id="login-form" method="post">
+				<fieldset id="login-controls">
+					<h2>管理员登录</h2>
+					<label>Client ID<input id="client-id" name="username" autocomplete="username" required></label>
+					<label>Client Secret<input id="client-secret" name="password" type="password" autocomplete="off" required></label>
+					<button class="primary" type="submit">登录</button>
+				</fieldset>
+			</form>
+		</section>
+		<fieldset id="admin-controls" hidden>
+			<section class="panel">
+				<form id="filter-form" class="filters">
+					<label>状态<select id="filter-status"><option value="">全部状态</option></select></label>
+					<label>
+						<span class="check-label"><input id="reference-enabled" type="checkbox">按关联标识筛选</span>
+						<input id="filter-reference" aria-label="关联标识" disabled>
+					</label>
+					<label>创建时间起点（含）<input id="created-from" type="datetime-local" step="1"></label>
+					<label>创建时间终点（不含）<input id="created-before" type="datetime-local" step="1"></label>
+					<label>更新时间起点（含）<input id="updated-from" type="datetime-local" step="1"></label>
+					<label>更新时间终点（不含）<input id="updated-before" type="datetime-local" step="1"></label>
+					<div class="filter-actions"><button class="primary" type="submit">筛选</button><button id="reset-filters" type="button">重置</button></div>
+					<div class="filter-actions"><button id="refresh" type="button">刷新列表</button></div>
+				</form>
+				<form id="lookup-form" class="lookup">
+					<label>审批单号<input id="lookup-id" type="text" inputmode="numeric" pattern="[1-9][0-9]*" required></label>
+					<button type="submit">查看详情</button>
+				</form>
+			</section>
+			<div class="workspace">
+				<section class="panel">
+					<h2>审批单</h2>
+					<div class="table-scroll">
+						<table>
+							<thead><tr><th>单号</th><th>标题 / 关联标识</th><th>接入方</th><th>状态</th><th>创建 / 截止时间</th></tr></thead>
+							<tbody id="approval-list"></tbody>
+						</table>
+					</div>
+					<p id="empty-list" class="muted" hidden>没有符合条件的审批单。</p>
+					<div class="pagination">
+						<span id="page-info" class="muted"></span>
+						<div class="actions"><button id="previous" type="button">上一页</button><button id="next" type="button">下一页</button></div>
+					</div>
+				</section>
+				<section class="panel" aria-label="审批单详情">
+					<div class="actions"><h2 id="detail-heading">审批单详情</h2><button id="refresh-detail" type="button" hidden>刷新详情</button></div>
+					<p id="detail-empty" class="muted" style="margin-top: 16px">选择列表中的单号，或按单号查询。</p>
+					<div id="detail" hidden>
+						<h3>基础信息</h3>
+						<dl id="basic-info"></dl>
+						<h3>申请内容</h3>
+						<h4 id="content-title" class="content-title"></h4>
+						<p id="content-description" class="description"></p>
+						<dl id="content-fields"></dl>
+						<h3>业务自定义数据</h3>
+						<p id="data-info" class="muted"></p>
+						<pre id="data-display"></pre>
+						<details id="raw-data"><summary>查看原始 Base64</summary><pre id="data-base64"></pre></details>
+						<h3>调整状态</h3>
+						<form id="status-form" class="status-form">
+							<select id="target-status" aria-label="目标状态"></select>
+							<button class="primary" type="submit">保存状态</button>
+						</form>
+						<p class="muted">状态调整不会撤销接入方已执行的操作。</p>
+					</div>
+				</section>
+			</div>
+		</fieldset>
+	</main>
+	<script>
+		'use strict';
+
+		const statuses = new Map([
+			['pending', '待审批'], ['approved', '已同意'], ['rejected', '已拒绝'],
+			['timed_out', '已超时'], ['cancelled', '已取消'],
+		]);
+		const pageSize = 20;
+		const apiBase = new URL(location.href);
+		apiBase.pathname = apiBase.pathname.replace(/\/admin\/?$/, '/api/v1/');
+		apiBase.search = '';
+		apiBase.hash = '';
+		let authorization = null;
+		let controller = null;
+		let sessionGeneration = 0;
+		let busy = false;
+		let offset = 0;
+		let items = [];
+		let filters = new URLSearchParams();
+		let selected = null;
+
+		const element = id => document.getElementById(id);
+		const textNode = (tag, text, className = '') => {
+			const node = document.createElement(tag);
+			node.textContent = text;
+			node.className = className;
+			return node;
+		};
+		const formatTime = timestamp => timestamp == null ? '—' : new Date(timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
+		const statusBadge = status => textNode('span', statuses.get(status), `badge ${status}`);
+		for (const [value, label] of statuses) {
+			element('filter-status').add(new Option(label, value));
+			element('target-status').add(new Option(label, value));
+		}
+
+		function message(text, error = false) {
+			element('message').textContent = text;
+			element('message').classList.toggle('error', error);
+			element('message').hidden = !text;
+		}
+
+		function logout() {
+			sessionGeneration += 1;
+			controller?.abort();
+			authorization = null;
+			busy = false;
+			element('login-controls').disabled = false;
+			element('login').hidden = false;
+			element('admin-controls').hidden = true;
+			element('session').hidden = true;
+			element('session-name').textContent = '';
+			element('login-form').reset();
+			element('filter-form').reset();
+			element('lookup-form').reset();
+			element('filter-reference').disabled = true;
+			element('approval-list').replaceChildren();
+			element('basic-info').replaceChildren();
+			element('content-fields').replaceChildren();
+			for (const id of ['content-title', 'content-description', 'data-display', 'data-base64', 'data-info']) {
+				element(id).textContent = '';
+			}
+			element('raw-data').open = false;
+			element('detail').hidden = true;
+			element('detail-empty').hidden = false;
+			element('detail-heading').textContent = '审批单详情';
+			element('refresh-detail').hidden = true;
+			items = [];
+			selected = null;
+			offset = 0;
+			filters = new URLSearchParams();
+			message('');
+		}
+
+		class APIError extends Error {
+			constructor(status, body) {
+				super(`${body.message || '请求失败'}（${body.code || status}）`);
+				this.status = status;
+			}
+		}
+
+		async function api(path, options = {}) {
+			const generation = sessionGeneration;
+			const response = await fetch(new URL(path, apiBase), {
+				...options, signal: controller.signal, credentials: 'omit', cache: 'no-store',
+				headers: { Authorization: authorization, ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
+			});
+			const body = await response.json().catch(() => ({}));
+			if (generation !== sessionGeneration) throw new DOMException('Session ended', 'AbortError');
+			if (!response.ok) throw new APIError(response.status, body);
+			return body;
+		}
+
+		async function perform(operation) {
+			if (busy) return;
+			busy = true;
+			const generation = sessionGeneration;
+			controller = new AbortController();
+			element('login-controls').disabled = true;
+			element('admin-controls').disabled = true;
+			message('');
+			try {
+				await operation();
+			} catch (error) {
+				if (generation !== sessionGeneration) return;
+				if (error instanceof APIError && (error.status === 401 || error.status === 403)) {
+					logout();
+					message(error.status === 401 ? '凭据无效或接入方已禁用，请重新登录。' : '该接入方没有管理员权限。', true);
+				} else {
+					message(error instanceof TypeError ? '无法连接服务，请检查连接后重试。' : error.message, true);
+				}
+			} finally {
+				if (generation === sessionGeneration) {
+					busy = false;
+					element('login-controls').disabled = false;
+					element('admin-controls').disabled = false;
+				}
+			}
+		}
+
+		function renderList() {
+			const rows = items.map(approval => {
+				const row = document.createElement('tr');
+				row.classList.toggle('selected', selected?.approval_id === approval.approval_id);
+				const id = textNode('button', `#${approval.approval_id}`, 'id-button');
+				id.type = 'button';
+				id.addEventListener('click', () => perform(() => loadDetail(approval.approval_id)));
+				const idCell = document.createElement('td');
+				idCell.append(id);
+				const title = textNode('td', '', 'title-cell');
+				title.append(textNode('div', approval.content.title), textNode('div', approval.reference_key ?? '—', 'muted'));
+				const status = document.createElement('td');
+				status.append(statusBadge(approval.status));
+				const dates = textNode('td', '', 'date-cell');
+				dates.append(textNode('div', formatTime(approval.created_at)), textNode('div', formatTime(approval.expires_at), 'muted'));
+				row.append(idCell, title, textNode('td', approval.client_id), status, dates);
+				return row;
+			});
+			element('approval-list').replaceChildren(...rows);
+			element('empty-list').hidden = items.length !== 0;
+			element('page-info').textContent = `第 ${offset / pageSize + 1} 页 · 本页 ${items.length} 条`;
+			element('previous').disabled = offset === 0;
+			element('next').disabled = items.length < pageSize;
+		}
+
+		async function loadPage(nextOffset, nextFilters = filters) {
+			const params = new URLSearchParams(nextFilters);
+			params.set('all', 'true');
+			params.set('limit', pageSize);
+			params.set('offset', nextOffset);
+			const page = await api(`approval?${params}`);
+			items = page.items;
+			offset = nextOffset;
+			filters = nextFilters;
+			renderList();
+		}
+
+		function addInfo(container, label, value) {
+			container.append(textNode('dt', label), textNode('dd', value ?? '—'));
+		}
+
+		function renderDetail(approval) {
+			selected = approval;
+			element('detail').hidden = false;
+			element('detail-empty').hidden = true;
+			element('refresh-detail').hidden = false;
+			element('detail-heading').textContent = `审批单 #${approval.approval_id}`;
+			const basic = element('basic-info');
+			basic.replaceChildren();
+			for (const [label, value] of [
+				['单号', approval.approval_id], ['所属接入方', approval.client_id], ['关联标识', approval.reference_key],
+				['当前状态', statuses.get(approval.status)], ['创建时间', formatTime(approval.created_at)],
+				['截止时间', formatTime(approval.expires_at)], ['更新时间', formatTime(approval.updated_at)],
+				['决定时间', formatTime(approval.decision?.decided_at)], ['审批人', approval.decision?.reviewer_name],
+			]) addInfo(basic, label, value);
+			element('content-title').textContent = approval.content.title;
+			element('content-description').textContent = approval.content.description;
+			const fields = element('content-fields');
+			fields.replaceChildren();
+			for (const field of approval.content.fields) addInfo(fields, field.name, field.value);
+			const bytes = Uint8Array.from(atob(approval.data), char => char.charCodeAt(0));
+			let format = 'Base64';
+			let display = approval.data;
+			if (bytes.length === 0) {
+				format = '空数据';
+				display = '（空）';
+			} else {
+				try {
+					display = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+					format = 'UTF-8 文本';
+					try {
+						display = JSON.stringify(JSON.parse(display), null, 2);
+						format = 'JSON';
+					} catch { /* Keep the original UTF-8 text. */ }
+				} catch { /* Keep the original Base64 for non-UTF-8 data. */ }
+			}
+			element('data-info').textContent = `版本 ${approval.data_version} · ${bytes.length} 字节 · ${format}`;
+			element('data-display').textContent = display;
+			element('data-base64').textContent = approval.data || '（空）';
+			element('raw-data').open = false;
+			const expired = Math.floor(Date.now() / 1000) >= approval.expires_at;
+			for (const option of element('target-status').options) {
+				option.disabled = (option.value === 'pending' && expired) || (option.value === 'timed_out' && !expired);
+			}
+			element('target-status').value = approval.status;
+			renderList();
+		}
+
+		async function loadDetail(id) {
+			const approval = await api(`approval/${id}`);
+			renderDetail(approval);
+		}
+
+		element('login-form').addEventListener('submit', event => {
+			event.preventDefault();
+			if (busy) return;
+			const generation = sessionGeneration;
+			const id = element('client-id').value;
+			const bytes = new TextEncoder().encode(`${id}:${element('client-secret').value}`);
+			authorization = 'Basic ' + btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(''));
+			element('client-secret').value = '';
+			perform(async () => {
+				try {
+					await loadPage(0, new URLSearchParams());
+					element('login').hidden = true;
+					element('admin-controls').hidden = false;
+					element('session').hidden = false;
+					element('session-name').textContent = id;
+				} catch (error) {
+					if (generation === sessionGeneration) authorization = null;
+					throw error;
+				}
+			});
+		});
+		element('logout').addEventListener('click', logout);
+		element('reference-enabled').addEventListener('change', () => {
+			element('filter-reference').disabled = !element('reference-enabled').checked;
+		});
+		element('filter-form').addEventListener('submit', event => {
+			event.preventDefault();
+			perform(async () => {
+				const params = new URLSearchParams();
+				if (element('filter-status').value) params.set('status', element('filter-status').value);
+				if (element('reference-enabled').checked) params.set('reference_key', element('filter-reference').value);
+				for (const id of ['created-from', 'created-before', 'updated-from', 'updated-before']) {
+					if (element(id).value) params.set(id.replace('-', '_'), Math.floor(new Date(element(id).value).getTime() / 1000));
+				}
+				await loadPage(0, params);
+			});
+		});
+		element('reset-filters').addEventListener('click', () => perform(async () => {
+			element('filter-form').reset();
+			element('filter-reference').disabled = true;
+			await loadPage(0, new URLSearchParams());
+		}));
+		element('refresh').addEventListener('click', () => perform(() => loadPage(offset)));
+		element('previous').addEventListener('click', () => perform(() => loadPage(Math.max(0, offset - pageSize))));
+		element('next').addEventListener('click', () => perform(() => loadPage(offset + pageSize)));
+		element('lookup-form').addEventListener('submit', event => {
+			event.preventDefault();
+			perform(() => loadDetail(element('lookup-id').value));
+		});
+		element('refresh-detail').addEventListener('click', () => perform(() => loadDetail(selected.approval_id)));
+		element('status-form').addEventListener('submit', event => {
+			event.preventDefault();
+			const id = selected.approval_id;
+			const status = element('target-status').value;
+			if (!confirm(`将审批单 #${id} 的状态调整为“${statuses.get(status)}”？`)) return;
+			perform(async () => {
+				const approval = await api(`approval/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) });
+				renderDetail(approval);
+				message(`审批单 #${id} ${statuses.get(approval.status)}。`);
+				try {
+					await loadPage(offset);
+				} catch (error) {
+					if (error.name === 'AbortError') throw error;
+					if (error instanceof APIError && (error.status === 401 || error.status === 403)) throw error;
+					message(`状态已保存，但列表刷新失败：${error.message}`, true);
+				}
+			});
+		});
+	</script>
+</body>
+</html>

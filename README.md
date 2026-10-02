@@ -127,6 +127,10 @@ cp config.example.toml config.toml
 Discord 不可用时 HTTP 仍可提供服务，健康接口报告降级状态。
 接口文档位于 `/docs`，OpenAPI 描述位于 `/openapi.json`。
 
+管理页面位于 `/admin`，使用启用且 `is_admin=true` 的接入方凭据登录。
+页面支持筛选审批单、查看详情与自定义数据、调整审批状态。刷新页面后需重新登录。
+对外提供管理页面时应通过 HTTPS 访问。
+
 安装开发依赖并运行检查：
 
 ```bash

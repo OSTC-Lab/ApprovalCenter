@@ -3,11 +3,12 @@ import binascii
 import logging
 import secrets
 from dataclasses import dataclass
+from pathlib import Path as FilePath
 from typing import Annotated, Callable, Literal, Mapping, Self
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, WithJsonSchema
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -192,6 +193,10 @@ def install_api(app: FastAPI, config: Config, service_provider: Callable[[], App
 
 	Client = Annotated[ClientConfig, Depends(authenticate)]
 	ApprovalId = Annotated[int, Path(ge=1, le=MAX_SQLITE_INTEGER)]
+
+	@app.get('/admin', include_in_schema=False)
+	async def get_admin() -> FileResponse:
+		return FileResponse(FilePath(__file__).with_name('admin.html'), headers={'Cache-Control': 'no-store'})
 
 	@app.exception_handler(ApprovalError)
 	async def approval_error_handler(request: Request, error: ApprovalError) -> JSONResponse:
