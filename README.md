@@ -1,313 +1,283 @@
 # ApprovalCenter
 
-ApprovalCenter is a small, self-hosted approval service.
-Clients create approvals through HTTP, reviewers make decisions through Discord buttons, and clients poll the results.
+ApprovalCenter 是一个自托管的轻量审批服务。
+接入方通过 HTTP 创建审批单，审批人员在 Discord 中同意或拒绝，接入方轮询结果后执行自己的业务逻辑。
 
-## Features
+## 功能概述
 
-- Single-step approval with multiple eligible reviewers. The first valid decision is final.
-- Immutable approval content with configurable deadlines and automatic timeout handling.
-- Client cancellation of pending approvals.
-- HTTP Basic authentication and isolation between registered clients.
-- Administrator clients for cross-client inspection and custom data updates.
-- Opaque per-approval byte storage with optional optimistic version checks.
-- SQLite persistence and recovery of unfinished Discord message synchronization.
-- Configurable retention, console logging, and a service health endpoint.
+- 单步审批，支持多个审批人员。
+- 创建、查询和取消审批单，自动处理审批超时。
+- 按接入方隔离数据，支持管理员接入方跨接入方操作。
+- 按业务关联标识筛选审批记录。
+- 每张审批单附带自定义字节数据，支持完整覆盖和可选的版本校验。
+- 使用 SQLite 持久化，支持配置保留期限和服务健康检查。
 
-## Architecture
+## 架构与基本概念
 
-FastAPI, the Discord bot, and periodic maintenance run in one process.
-They share the approval service and SQLite database.
+HTTP API、Discord Bot 和定期维护在同一个进程中运行，通过审批服务访问 SQLite。
+Discord 卡片异步发布和更新，未完成的同步会在连接恢复或服务重启后继续处理。
 
 ```mermaid
 flowchart LR
-    client["HTTP client"]
-    reviewers["Reviewers"]
+    client["接入方"]
+    reviewers["审批人员"]
     platform["Discord"]
     database[("SQLite")]
 
-    subgraph center["ApprovalCenter (single process)"]
+    subgraph center["ApprovalCenter（单进程）"]
         api["HTTP API"]
-        service["Approval service"]
-        bot["Discord bot"]
-        maintenance["Periodic maintenance"]
+        service["审批服务"]
+        bot["Discord Bot"]
+        maintenance["定期维护"]
     end
 
-    client <-->|Create, cancel, poll, replace data| api
-    api <-->|Operations and results| service
-    service <-->|Persist and query| database
-    reviewers -->|Approve or reject| platform
-    platform <-->|Cards and interactions| bot
-    bot -->|Submit decision| service
-    maintenance -->|Timeouts, cleanup, sync state| service
-    maintenance -->|Publish or update cards| bot
+    client <-->|创建、查询、取消、覆盖数据| api
+    api <-->|处理审批单| service
+    service <-->|保存和读取| database
+    reviewers -->|同意或拒绝| platform
+    platform <-->|卡片与按钮交互| bot
+    bot -->|提交审批决定| service
+    maintenance -->|处理超时、清理过期数据| service
+    maintenance -->|同步卡片| bot
 ```
 
-### Clients and reviewers
+### 接入方与审批人员
 
-A client is an HTTP integration identified by `client_id` and authenticated with `client_secret`.
-Both are configured in TOML. Each approval belongs to its creating client.
-Changing a secret or display name preserves ownership.
+接入方以 `client_id` 标识，通过 `client_secret` 鉴权，两者均在 TOML 配置中定义。
+审批单归创建它的接入方所有，修改密钥或展示名称不改变归属。
+管理员接入方可以操作其他接入方的单据，便于调试和管理。
 
-Reviewers are Discord users matched against configured user IDs or role IDs. Either match grants approval permission.
-Client administrator permissions affect HTTP data access only.
-Discord administrator permissions do not grant approval permission automatically.
+审批人员使用 Discord 身份，匹配配置中的用户白名单或角色白名单即可审批。
+接入方的管理员属性仅影响 HTTP 权限，Discord 管理员身份也不会自动获得审批资格。
 
-### Approvals
+### 审批单
 
-Each approval has a non-reused, auto-incrementing integer `approval_id`.
-Approval content contains a title, description, and ordered display fields.
-The service stores and renders this content without interpreting its business meaning.
+每张审批单有一个自增整数 `approval_id`，清理后的单号不会再次使用。
+接入方提交标题、说明和展示字段，中心负责保存与展示，不解释其中的业务含义。
 
-An optional, immutable `reference_key` associates approvals with a client-defined business object.
-The service stores it as an opaque string and supports exact-match listing.
-Multiple approvals can share the same key. Clients define the key's format and scope.
+可选字段 `reference_key` 用于关联接入方的业务对象，例如某个服务器上的玩家。
+创建后不可修改，同一个标识可以关联多张单据。标识格式和归属范围由接入方定义。
 
-All API timestamps are integer Unix timestamps in seconds.
+所有接口时间均使用整数 Unix 时间戳，单位为秒。
 
-| Status      | Meaning                                                   |
-|-------------|-----------------------------------------------------------|
-| `pending`   | Awaiting a decision before the deadline                   |
-| `approved`  | Approved by an eligible reviewer                          |
-| `rejected`  | Rejected by an eligible reviewer                          |
-| `timed_out` | The deadline was reached without a valid decision         |
-| `cancelled` | Cancelled by the owning client or an administrator client |
+| 状态        | 含义                             |
+|-------------|----------------------------------|
+| `pending`   | 等待审批                         |
+| `approved`  | 已同意                           |
+| `rejected`  | 已拒绝                           |
+| `timed_out` | 截止前未形成有效决定，已超时     |
+| `cancelled` | 已由所属接入方或管理员接入方取消 |
 
-The four terminal states cannot change. `expires_at` bounds the decision and cancellation window.
-An approval in the approved state retains that state after the deadline.
-Clients define the validity and consumption rules for approved operations.
+除 `pending` 外，其余状态均为终态，不再变更。
+`expires_at` 限定审批和取消的时间窗口，已同意的单据过了截止时间仍保持 `approved`。
+接入方负责定义授权有效期、执行次数和具体操作。
 
-### Custom data and persistence
+### 自定义数据与保留期限
 
-Each approval has a byte payload owned by its client. HTTP transports it as standard Base64.
-The service does not interpret the payload or display it in Discord.
+每张审批单附带一份自定义字节数据，HTTP 中使用标准 Base64 编码。
+中心不解释这份数据，也不将其展示给审批人员。
 
-The payload starts at version `0`.
-Every successful replacement increments its version and updates the approval's `updated_at`.
-Payload updates do not modify approval content or extend retention.
-Payloads remain writable in final states.
+数据版本从 `0` 开始，每次成功覆盖后递增，同时更新审批单的 `updated_at`。
+覆盖时可以提供预期版本，防止覆盖其他调用方刚写入的数据。
+终态单据在保留期内仍可覆盖自定义数据，覆盖不会修改审批内容或延长保留期限。
 
-SQLite persists approvals and their custom data.
-Discord cards are synchronized asynchronously, with unfinished updates retried after failures and restarts.
+单据保留至 `expires_at + retention_seconds`，超过保留期限后无法通过接口访问，并由定期维护清理。
+审批和取消均在操作时检查截止时间，维护间隔不会延长审批窗口。
 
-Queries, decisions, and cancellation enforce the deadline independently of the maintenance interval.
-Records are retained until `expires_at + retention_seconds`.
-Expired records are excluded from API access and removed during maintenance.
+## 运行与部署
 
-Clients are responsible for executing approved operations and matching their execution targets to the approved content.
+### 环境要求
 
-## Deployment
+- 源码部署：Python 3.13 或更高版本，以及 [uv](https://docs.astral.sh/uv/)。
+- 容器部署：Docker；使用 Compose 模板时需要 Docker Compose v2。
+- Discord Bot：能够访问配置中的服务器和审批频道。
 
-### Requirements
+Bot 需要 View Channel、Send Messages、Embed Links、Read Message History 权限。
+仅使用 Guilds intent，无需开启 Message Content 或 Server Members 特权 intent。
 
-- Python 3.13 or later and [uv](https://docs.astral.sh/uv/) for source deployment.
-- Docker for container deployment; Docker Compose v2 for the supplied template.
-- A Discord bot with access to the configured server and approval channel.
+### 源码部署
 
-The bot needs View Channel, Send Messages, Embed Links, and Read Message History permissions.
-It uses the Guilds intent; Message Content and Server Members privileged intents are not required.
-
-### Source deployment
-
-Run these commands from the repository root:
+在仓库根目录安装依赖并准备配置：
 
 ```bash
 uv sync --locked --no-dev --python 3.13
 cp config.example.toml config.toml
 ```
 
-Edit `config.toml` to supply the bot token, Discord IDs, reviewer rules, and client secrets. Start the service:
+编辑 `config.toml`，填写 Bot token、Discord ID、审批白名单和接入方密钥，然后启动：
 
 ```bash
 .venv/bin/python src/main.py --config config.toml
 ```
 
-The default configuration path is `config.toml`.
-Relative database paths resolve against the configuration file's directory. Configuration changes require a restart.
+默认配置路径为 `config.toml`，也可以通过 `--config` 指定。修改配置后重启生效。
 
-### Docker deployment
+### Docker 部署
 
-Image: `ghcr.io/ostc-lab/approvalcenter:master` (`linux/amd64`).
+镜像：`ghcr.io/ostc-lab/approvalcenter:master`，支持 `linux/amd64`。
 
-Use [config.docker.toml](config.docker.toml) as the template for `config.toml` and fill in the credentials and Discord IDs.
-Mount `config.toml` at `/config/config.toml` and persist `/data`.
+以 [config.docker.toml](config.docker.toml) 为模板填写配置，挂载至容器内的 `/config/config.toml`，
+并持久化 `/data`。
+仓库提供一个可复制使用的[最简 Compose 模板](docker/docker-compose.yml)。
 
-A minimal [Docker Compose template](docker/docker-compose.yml) is available to copy and adapt for deployment.
+### 运行管理与开发
 
-### Operation and development
+服务应以单实例运行。日志输出到控制台，不记录凭据和自定义数据。
+Discord 不可用时 HTTP 仍可提供服务，健康接口报告降级状态。
+接口文档位于 `/docs`，OpenAPI 描述位于 `/openapi.json`。
 
-Logs are written to the console without credentials or custom payloads.
-
-A Discord connection failure leaves HTTP available and health degraded.
-
-The service runs as a single instance.
-Interactive API documentation is available at `/docs`, with the OpenAPI schema at `/openapi.json`.
-
-Development dependencies and checks:
+安装开发依赖并运行检查：
 
 ```bash
 uv sync --locked --python 3.13
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m mypy src
+.venv/bin/python -m mypy src sdk/approval_center_sdk.py
 ```
 
-## Configuration
+## 配置明细
 
-Configuration is a single TOML file. Unknown fields are rejected. Discord IDs are quoted decimal strings.
-At least one client and one reviewer user or role must be configured.
+完整配置参考 [config.example.toml](config.example.toml)，容器环境参考 [config.docker.toml](config.docker.toml)。
+配置中未定义的字段会被拒绝，Discord ID 必须写成十进制字符串。
+至少配置一个接入方，并设置审批用户或审批角色白名单。
 
-The complete configuration template is available in [config.example.toml](config.example.toml).
+### 服务：`[service]`
 
-### Service
+| 字段       | 类型   | 默认值                      | 说明                             |
+|------------|--------|-----------------------------|----------------------------------|
+| `host`     | 字符串 | `"127.0.0.1"`               | 监听地址，容器内使用 `"0.0.0.0"` |
+| `port`     | 整数   | `8731`                      | 监听端口，范围 1–65535           |
+| `database` | 字符串 | `"approval_center.sqlite3"` | SQLite 文件路径                  |
 
-| Field      | Type    | Default                     | Description                                                  |
-|------------|---------|-----------------------------|--------------------------------------------------------------|
-| `host`     | string  | `"127.0.0.1"`               | HTTP listening address; use `"0.0.0.0"` inside the container |
-| `port`     | integer | `8731`                      | HTTP port, from 1 to 65535                                   |
-| `database` | string  | `"approval_center.sqlite3"` | SQLite file path                                             |
+数据库相对路径以配置文件所在目录为基准。容器部署使用 `/data/approval_center.sqlite3`。
 
-Relative database paths resolve against the configuration directory.
-Container deployments use `/data/approval_center.sqlite3`.
+### Discord：`[discord]`
 
-### Discord
+| 字段                | 类型       | 默认值 | 说明                      |
+|---------------------|------------|--------|---------------------------|
+| `token`             | 字符串     | 必填   | Bot token，不可为空       |
+| `proxy_url`         | 字符串     | 不设置 | 可选的 `http://` 代理地址 |
+| `guild_id`          | 字符串     | 必填   | Discord 服务器 ID         |
+| `channel_id`        | 字符串     | 必填   | 审批文字频道或线程 ID     |
+| `reviewer_ids`      | 字符串数组 | `[]`   | 可审批的用户 ID           |
+| `reviewer_role_ids` | 字符串数组 | `[]`   | 可审批的角色 ID           |
 
-| Field               | Type         | Default  | Description                        |
-|---------------------|--------------|----------|------------------------------------|
-| `token`             | string       | Required | Non-empty bot token                |
-| `proxy_url`         | string       | Omitted  | Optional `http://` proxy URL       |
-| `guild_id`          | string       | Required | Discord server ID                  |
-| `channel_id`        | string       | Required | Approval text channel or thread ID |
-| `reviewer_ids`      | string array | `[]`     | Eligible reviewer user IDs         |
-| `reviewer_role_ids` | string array | `[]`     | Eligible reviewer role IDs         |
+两项白名单至少有一项非空。审批时检查用户的当前身份和角色。
+修改频道配置只影响新建单据，已有单据保留原频道。
 
-At least one reviewer list must be non-empty. Current membership and roles are checked when a user makes a decision.
-Channel changes apply to new approvals; existing approvals keep their original channel.
+不设置 `proxy_url` 时直接连接。代理示例：`proxy_url = "http://127.0.0.1:7890"`。
+需要认证时使用 `http://username:password@host:port`，凭据中的特殊字符需做百分号编码。
+代理地址必须包含主机名，可指定端口；路径只允许为空或 `/`，不能包含查询参数或片段。
+空值和非 `http://` 协议会被拒绝。
 
-Omit `proxy_url` to connect directly. To use an HTTP proxy, set it under `[discord]`, for example
-`proxy_url = "http://127.0.0.1:7890"`. Authentication is supported with
-`http://username:password@host:port`; percent-encode reserved characters in credentials.
-The URL must have a host and an optional port, with no path other than `/`, query, or fragment.
-Empty values and proxy schemes other than `http://` are rejected.
+代理必须支持 CONNECT，用于 Discord HTTPS 和 Gateway WebSocket 连接。
+配置后所有 Bot 连接均使用该代理，代理失败时不会改用直连。系统代理环境变量不生效。
 
-The proxy must support CONNECT for Discord HTTPS and Gateway WebSocket connections.
-It applies to all bot connections; proxy failures do not fall back to a direct connection.
-System proxy environment variables are not used.
+### 接入方：`[[clients]]`
 
-### Clients
+每个配置项定义一个接入方。
 
-Each `[[clients]]` entry registers an integration.
+| 字段            | 类型   | 默认值  | 说明                                                    |
+|-----------------|--------|---------|---------------------------------------------------------|
+| `client_id`     | 字符串 | 必填    | 唯一、稳定的接入方标识                                  |
+| `client_secret` | 字符串 | 必填    | HTTP Basic 密钥，不可为空                               |
+| `display_name`  | 字符串 | 必填    | 卡片展示名称，不可全为空白，最多 256 个 UTF-16 代码单元 |
+| `enabled`       | 布尔值 | `true`  | 是否允许该接入方鉴权                                    |
+| `is_admin`      | 布尔值 | `false` | 是否允许访问其他接入方的审批单和数据                    |
 
-| Field           | Type    | Default  | Description                                             |
-|-----------------|---------|----------|---------------------------------------------------------|
-| `client_id`     | string  | Required | Unique, stable ownership identifier                     |
-| `client_secret` | string  | Required | Non-empty HTTP Basic password                           |
-| `display_name`  | string  | Required | Non-blank card author name, up to 256 UTF-16 code units |
-| `enabled`       | boolean | `true`   | Whether this client may authenticate                    |
-| `is_admin`      | boolean | `false`  | Allow access to any client's approval and payload       |
+`client_id` 长度为 1–128，只允许 `A-Z`、`a-z`、`0-9`、`_`、`.`、`-`。
+禁用接入方不会删除其单据。示例中的管理员接入方默认禁用，启用前需填写密钥。
 
-`client_id` accepts 1–128 characters from `A-Z`, `a-z`, `0-9`, `_`, `.`, and `-`.
+### 策略：`[policy]`
 
-Disabling a client does not remove its approvals.
-The example administrator client is disabled until explicitly enabled and assigned a secret.
+| 字段                   | 类型 | 默认值     | 说明                                   |
+|------------------------|------|------------|----------------------------------------|
+| `maintenance_interval` | 数值 | `5`        | 维护间隔，单位为秒                     |
+| `max_approval_seconds` | 整数 | `604800`   | 创建至截止时间的最大间隔，默认 7 天    |
+| `retention_seconds`    | 整数 | `15552000` | 截止后保留时长，默认 180 天            |
+| `max_data_bytes`       | 整数 | `1048576`  | 自定义数据解码后的大小上限，默认 1 MiB |
 
-### Policy
+以上数值必须为正数。修改保留时长会影响已有单据。
 
-| Field                  | Type    | Default    | Description                                              |
-|------------------------|---------|------------|----------------------------------------------------------|
-| `maintenance_interval` | number  | `5`        | Positive interval between maintenance cycles, in seconds |
-| `max_approval_seconds` | integer | `604800`   | Maximum time between creation and deadline; 7 days       |
-| `retention_seconds`    | integer | `15552000` | Time retained after the deadline; 180 days               |
-| `max_data_bytes`       | integer | `1048576`  | Maximum decoded custom payload size; 1 MiB               |
+### 日志：`[logging]`
 
-All policy values must be positive. Payload updates do not reset retention.
-Changes to retention apply to existing records.
+| 字段    | 类型   | 默认值   | 说明                              |
+|---------|--------|----------|-----------------------------------|
+| `level` | 字符串 | `"INFO"` | Python 标准日志级别，不区分大小写 |
 
-### Logging
+支持 `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL`、`NOTSET`。
 
-| Field   | Type   | Default  | Description                                     |
-|---------|--------|----------|-------------------------------------------------|
-| `level` | string | `"INFO"` | Standard Python logging level; case-insensitive |
+## API 用法与接口
 
-Supported standard names include `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, and `NOTSET`.
+### 通用格式与鉴权
 
-## API
-
-### HTTP format and authentication
-
-Business endpoints use HTTP Basic. The username is `client_id` and the password is `client_secret`.
-Set the `Authorization` header to `Basic ` followed by the standard Base64 encoding of `client_id:client_secret`.
+业务接口使用 HTTP Basic：用户名为 `client_id`，密码为 `client_secret`。
+将 `client_id:client_secret` 做标准 Base64 编码，放入 `Authorization` 请求头：
 
 ```http
 Authorization: Basic <base64(client_id:client_secret)>
 Content-Type: application/json
 ```
 
-Endpoints with a JSON body require `Content-Type: application/json`.
-GET endpoints and the cancellation endpoint have no JSON body.
-The health endpoint does not require authentication.
+有 JSON body 的接口需要 `Content-Type: application/json`。
+GET 接口和取消接口没有 JSON body，健康接口无需鉴权。
 
-| Operation                   | Regular client    | Administrator client   |
-|-----------------------------|-------------------|------------------------|
-| Create an approval          | Owned by itself   | Owned by itself        |
-| List with `all=false`       | Its own approvals | Its own approvals      |
-| List with `all=true`        | HTTP 403          | All clients' approvals |
-| Read an approval or payload | Its own approvals | Any client's approvals |
-| Replace a payload           | Its own approvals | Any client's approvals |
-| Cancel a pending approval   | Its own approvals | Any client's approvals |
+| 操作                             | 普通接入方 | 管理员接入方     |
+|----------------------------------|------------|------------------|
+| 创建                             | 归属于自己 | 归属于自己       |
+| 列表，`all=false`                | 自己的单据 | 自己的单据       |
+| 列表，`all=true`                 | 返回 403   | 全部接入方的单据 |
+| 查询审批单、读取或覆盖数据、取消 | 自己的单据 | 任意接入方的单据 |
 
-An inaccessible approval and a nonexistent approval both return HTTP 404.
-Clients cannot choose an owner during creation.
+无法访问的单号与不存在的单号均返回 404。创建时不能指定其他接入方为所有者。
 
-### Endpoint summary
+| 方法 | 路径                                    | 成功状态码 |
+|------|-----------------------------------------|------------|
+| POST | `/api/v1/approval`                      | 201        |
+| GET  | `/api/v1/approval`                      | 200        |
+| GET  | `/api/v1/approval/{approval_id}`        | 200        |
+| POST | `/api/v1/approval/{approval_id}/cancel` | 200        |
+| GET  | `/api/v1/approval-data/{approval_id}`   | 200        |
+| PUT  | `/api/v1/approval-data/{approval_id}`   | 200        |
+| GET  | `/heathz`                               | 200        |
 
-| Method | Path                                    | Success |
-|--------|-----------------------------------------|---------|
-| POST   | `/api/v1/approval`                      | 201     |
-| GET    | `/api/v1/approval`                      | 200     |
-| GET    | `/api/v1/approval/{approval_id}`        | 200     |
-| POST   | `/api/v1/approval/{approval_id}/cancel` | 200     |
-| GET    | `/api/v1/approval-data/{approval_id}`   | 200     |
-| PUT    | `/api/v1/approval-data/{approval_id}`   | 200     |
-| GET    | `/heathz`                               | 200     |
-
-### Create an approval
+### 创建审批单
 
 `POST /api/v1/approval`
 
-| Body field      | Type           | Required | Description                                          |
-|-----------------|----------------|----------|------------------------------------------------------|
-| `content`       | object         | Yes      | Immutable display content                            |
-| `expires_at`    | integer        | Yes      | Future Unix deadline in seconds                      |
-| `data`          | string         | No       | Standard Base64 payload; defaults to empty bytes     |
-| `reference_key` | string or null | No       | Immutable business association key; defaults to null |
+| 请求字段        | 类型          | 必填 | 说明                                    |
+|-----------------|---------------|------|-----------------------------------------|
+| `content`       | 对象          | 是   | 审批展示内容，创建后不可修改            |
+| `expires_at`    | 整数          | 是   | 审批截止时间                            |
+| `data`          | 字符串        | 否   | Base64 自定义数据，默认空字节           |
+| `reference_key` | 字符串或 null | 否   | 业务关联标识，默认 null，创建后不可修改 |
 
-The deadline must be strictly later than service time and within `max_approval_seconds`.
+截止时间必须晚于服务当前时间，且间隔不超过 `max_approval_seconds`。
 
-Display content:
+`content` 的结构与限制：
 
-| Field             | Type         | Default  | Limit                                   |
-|-------------------|--------------|----------|-----------------------------------------|
-| `title`           | string       | Required | Non-blank, up to 256 UTF-16 code units  |
-| `description`     | string       | `""`     | Up to 4096 UTF-16 code units            |
-| `fields`          | object array | `[]`     | Up to 25 ordered fields                 |
-| `fields[].name`   | string       | Required | Non-blank, up to 256 UTF-16 code units  |
-| `fields[].value`  | string       | Required | Non-blank, up to 1024 UTF-16 code units |
-| `fields[].inline` | boolean      | `false`  | Allow inline layout                     |
+| 字段              | 类型     | 默认值  | 限制                                       |
+|-------------------|----------|---------|--------------------------------------------|
+| `title`           | 字符串   | 必填    | 不可全为空白，最多 256 个 UTF-16 代码单元  |
+| `description`     | 字符串   | `""`    | 最多 4096 个 UTF-16 代码单元               |
+| `fields`          | 对象数组 | `[]`    | 按顺序展示，最多 25 个字段                 |
+| `fields[].name`   | 字符串   | 必填    | 不可全为空白，最多 256 个 UTF-16 代码单元  |
+| `fields[].value`  | 字符串   | 必填    | 不可全为空白，最多 1024 个 UTF-16 代码单元 |
+| `fields[].inline` | 布尔值   | `false` | 是否允许并排展示                           |
 
-The combined length of title, description, and field names and values must not exceed 5500 UTF-16 code units.
-Unknown JSON body and content fields are rejected.
+标题、说明及所有字段名称和值的总长度不得超过 5500 个 UTF-16 代码单元。
+请求 body 和 `content` 中未定义的字段会被拒绝。
 
-JSON body:
+请求 JSON：
 
 ```json
 {
   "content": {
-    "title": "Restore backup",
-    "description": "Recover from an accidental change",
+    "title": "申请回档",
+    "description": "恢复误操作造成的损失",
     "fields": [
-      {"name": "Player", "value": "Steve", "inline": true},
-      {"name": "Server", "value": "survival", "inline": true},
-      {"name": "Backup", "value": "#123", "inline": false}
+      {"name": "玩家", "value": "Steve", "inline": true},
+      {"name": "服务器", "value": "survival", "inline": true},
+      {"name": "目标备份", "value": "#123", "inline": false}
     ]
   },
   "expires_at": 1790866200,
@@ -316,9 +286,9 @@ JSON body:
 }
 ```
 
-`expires_at` must be a future timestamp when the API is called.
+实际调用时需将 `expires_at` 替换为未来时间。
 
-Response structure:
+响应 JSON：
 
 ```json
 {
@@ -331,79 +301,74 @@ Response structure:
 }
 ```
 
-Discord card publication is asynchronous.
+创建成功后返回单号，Discord 卡片异步发布。
 
-### Read an approval
+### 查询审批单
 
 `GET /api/v1/approval/{approval_id}`
 
-| Response field  | Type           | Description                                                           |
-|-----------------|----------------|-----------------------------------------------------------------------|
-| `approval_id`   | integer        | Unique approval ID                                                    |
-| `client_id`     | string         | Creating client's ID                                                  |
-| `reference_key` | string or null | Original business association key                                     |
-| `content`       | object         | Original display content                                              |
-| `status`        | string         | `pending`, `approved`, `rejected`, `timed_out`, or `cancelled`        |
-| `created_at`    | integer        | Creation timestamp                                                    |
-| `expires_at`    | integer        | Decision deadline                                                     |
-| `updated_at`    | integer        | Last status or payload change                                         |
-| `decision`      | object or null | Null while pending; otherwise contains `reviewer_id` and `decided_at` |
-| `data`          | string         | Current Base64 payload                                                |
-| `data_version`  | integer        | Current payload version                                               |
+| 响应字段        | 类型          | 说明                                                      |
+|-----------------|---------------|-----------------------------------------------------------|
+| `approval_id`   | 整数          | 审批单号                                                  |
+| `client_id`     | 字符串        | 所属接入方                                                |
+| `reference_key` | 字符串或 null | 创建时的业务关联标识                                      |
+| `content`       | 对象          | 原始展示内容                                              |
+| `status`        | 字符串        | 审批单状态，取值见前文                                    |
+| `created_at`    | 整数          | 创建时间                                                  |
+| `expires_at`    | 整数          | 截止时间                                                  |
+| `updated_at`    | 整数          | 最近一次状态或自定义数据变化时间                          |
+| `decision`      | 对象或 null   | 待审批时为 null，终态时包含 `reviewer_id` 和 `decided_at` |
+| `data`          | 字符串        | 当前 Base64 自定义数据                                    |
+| `data_version`  | 整数          | 当前数据版本                                              |
 
-When status is `approved` or `rejected`,
-`decision.reviewer_id` is the reviewer's decimal Discord ID and `decision.decided_at` is the decision timestamp.
-For timeout, the reviewer is null and the decision timestamp equals `expires_at`.
-For cancellation, the reviewer is null and the decision timestamp records when the approval was cancelled.
+同意或拒绝时，`decision.reviewer_id` 为审批人员的 Discord ID，`decided_at` 为决定时间。
+超时时，审批人员为 null，时间等于 `expires_at`；取消时，审批人员为 null，时间为取消时间。
 
-Clients poll this endpoint to observe approval status changes.
-Multiple updates can share the same second-level `updated_at`; use the payload version for optimistic concurrency.
+接入方轮询该接口获取状态变化。多次更新可能发生在同一秒，版本校验应使用数据版本。
 
-### List approvals
+### 列出审批单
 
 `GET /api/v1/approval`
 
-| Query parameter  | Type    | Default | Description                                 |
-|------------------|---------|---------|---------------------------------------------|
-| `status`         | string  | Unset   | Filter by one approval status               |
-| `reference_key`  | string  | Unset   | Exact match on the business association key |
-| `created_from`   | integer | Unset   | Inclusive creation timestamp lower bound    |
-| `created_before` | integer | Unset   | Exclusive creation timestamp upper bound    |
-| `updated_from`   | integer | Unset   | Inclusive update timestamp lower bound      |
-| `updated_before` | integer | Unset   | Exclusive update timestamp upper bound      |
-| `limit`          | integer | `100`   | Page size, from 1 to 1000                   |
-| `offset`         | integer | `0`     | Non-negative number of records to skip      |
-| `all`            | boolean | `false` | Administrator-only full-client scope        |
+| 查询参数         | 类型   | 默认值  | 说明                           |
+|------------------|--------|---------|--------------------------------|
+| `status`         | 字符串 | 不设置  | 按一个审批状态筛选             |
+| `reference_key`  | 字符串 | 不设置  | 按业务关联标识精确匹配         |
+| `created_from`   | 整数   | 不设置  | 创建时间下界，包含该时间       |
+| `created_before` | 整数   | 不设置  | 创建时间上界，不包含该时间     |
+| `updated_from`   | 整数   | 不设置  | 更新时间下界，包含该时间       |
+| `updated_before` | 整数   | 不设置  | 更新时间上界，不包含该时间     |
+| `limit`          | 整数   | `100`   | 每页条数，范围 1–1000          |
+| `offset`         | 整数   | `0`     | 跳过的条数，必须非负           |
+| `all`            | 布尔值 | `false` | 管理员接入方是否查询全部接入方 |
 
-When both bounds of a time range are supplied, the lower bound must be less than the upper bound.
-Results are ordered by `created_at DESC, approval_id DESC`.
+同时设置时间上下界时，下界必须小于上界。结果按创建时间、单号倒序排列。
 
-Omitting `reference_key` leaves the listing unrestricted by key, including approvals with a null key.
-Supplying it matches the stored string exactly, including case; approvals with a null key never match.
-The query value `null` is a literal string, and an empty query value matches only an empty stored string.
-Key filtering applies together with client ownership, status, time ranges, and pagination.
+不设置 `reference_key` 时不限制标识，包括标识为 null 的单据。
+设置后按字符串精确匹配，区分大小写，null 不会命中。
+查询值 `null` 是普通字符串，空查询值只匹配空字符串。
 
-The response contains `items`, `limit`, and `offset`. Each item has the complete approval structure described above.
-Increase the offset to read subsequent pages; a page shorter than the limit ends the current listing.
-Offset pagination reflects current data rather than a fixed snapshot.
+响应包含 `items`、`limit`、`offset`，每个条目都是完整审批单。
+增加 `offset` 可以读取后续页面，返回条数少于 `limit` 表示当前已无下一页。
+分页反映查询时的数据，不提供固定快照。
 
-Administrator clients use `all=true` to list all owners. Without that parameter they receive only their own approvals.
-
-### Cancel an approval
+### 取消审批单
 
 `POST /api/v1/approval/{approval_id}/cancel`
 
-The endpoint has no JSON body. A successful response returns the complete approval structure.
-An unexpired pending approval changes to `cancelled` and records the cancellation time.
+没有请求 body，成功返回完整审批单。
+未到截止时间的 `pending` 单据转为 `cancelled`，记录取消时间。
+重复取消已取消的单据返回 200，不修改时间。
 
-Repeating cancellation of a cancelled approval returns HTTP 200 without changing its timestamps.
-Approved, rejected, and timed-out approvals return HTTP 409 with code `approval_not_pending`.
-A pending approval at its deadline becomes `timed_out` before the endpoint returns HTTP 409.
-Missing, inaccessible, or retention-expired approvals return HTTP 404.
+已同意、已拒绝和已超时的单据返回 409，错误码为 `approval_not_pending`。
+达到截止时间的待审批单先转为 `timed_out`，再返回 409。
+单据不存在、无访问权限或超过保留期限时返回 404。
 
-### Read custom data
+### 读取自定义数据
 
 `GET /api/v1/approval-data/{approval_id}`
+
+响应 JSON：
 
 ```json
 {
@@ -413,18 +378,18 @@ Missing, inaccessible, or retention-expired approvals return HTTP 404.
 }
 ```
 
-`updated_at` is the approval timestamp and can also change because of a decision, timeout, or cancellation.
+`updated_at` 是审批单的更新时间，也可能因审批、超时或取消而变化。
 
-### Replace custom data
+### 覆盖自定义数据
 
 `PUT /api/v1/approval-data/{approval_id}`
 
-| Body field         | Type            | Required | Description                                              |
-|--------------------|-----------------|----------|----------------------------------------------------------|
-| `data`             | string          | Yes      | Complete replacement payload, encoded as standard Base64 |
-| `expected_version` | integer or null | No       | Optional current payload version                         |
+| 请求字段           | 类型        | 必填 | 说明                               |
+|--------------------|-------------|------|------------------------------------|
+| `data`             | 字符串      | 是   | 完整的新数据，使用标准 Base64 编码 |
+| `expected_version` | 整数或 null | 否   | 可选的当前数据版本                 |
 
-JSON body:
+请求 JSON：
 
 ```json
 {
@@ -433,7 +398,7 @@ JSON body:
 }
 ```
 
-A successful response contains the new version and approval timestamp:
+成功后返回新版本和审批单更新时间：
 
 ```json
 {
@@ -442,17 +407,15 @@ A successful response contains the new version and approval timestamp:
 }
 ```
 
-A mismatched version returns HTTP 409 and preserves the existing payload.
-Read the current version before submitting another version-checked update.
-Omitting `expected_version` or setting it to null accepts direct replacement.
-An empty string clears the payload to empty bytes.
+预期版本与当前版本不符时返回 409，原数据保持不变。
+省略 `expected_version` 或传 null 时直接覆盖，`data` 传空字符串时清空数据。
+自定义数据写入与接入方的业务执行不构成跨系统事务，执行和恢复策略由接入方负责。
 
-Payload writes and execution of an external operation do not form a cross-system transaction.
-Clients define their own execution and recovery behavior.
-
-### Health
+### 健康检查
 
 `GET /heathz`
+
+响应 JSON：
 
 ```json
 {
@@ -464,14 +427,12 @@ Clients define their own execution and recovery behavior.
 }
 ```
 
-HTTP 200 indicates healthy operation.
-HTTP 503 indicates degraded operation,
-with `status` set to `"degraded"` and component flags identifying the failing checks.
-HTTP business endpoints can remain available during Discord degradation.
+健康时返回 200。降级时返回 503，`status` 为 `"degraded"`，组件字段标识异常位置。
+Discord 降级期间，HTTP 业务接口仍可能可用。
 
-### Errors
+### 错误响应
 
-Errors use a stable code and a readable message:
+失败响应包含稳定的 `code` 和可读的 `message`：
 
 ```json
 {
@@ -480,15 +441,21 @@ Errors use a stable code and a readable message:
 }
 ```
 
-| HTTP status | Code                    | Meaning                                                                       |
-|-------------|-------------------------|-------------------------------------------------------------------------------|
-| 401         | `authentication_failed` | Missing, invalid, or disabled client credentials                              |
-| 403         | `forbidden`             | A regular client requested `all=true`                                         |
-| 404         | `approval_not_found`    | Missing, inaccessible, or retention-expired approval                          |
-| 409         | `data_version_conflict` | Payload version mismatch                                                      |
-| 409         | `approval_not_pending`  | Cancellation requires a pending approval; other terminal states cannot change |
-| 422         | `invalid_request`       | Invalid body, query, path, deadline, display content, or payload              |
-| 500         | `internal_error`        | Unexpected service failure                                                    |
+| HTTP 状态码 | 错误码                  | 含义                                          |
+|-------------|-------------------------|-----------------------------------------------|
+| 401         | `authentication_failed` | 凭据缺失、错误，或接入方已禁用                |
+| 403         | `forbidden`             | 普通接入方请求 `all=true`                     |
+| 404         | `approval_not_found`    | 单据不存在、无访问权限或超过保留期限          |
+| 409         | `data_version_conflict` | 自定义数据版本不符                            |
+| 409         | `approval_not_pending`  | 单据已处于其他终态，无法取消                  |
+| 422         | `invalid_request`       | 请求 body、参数、截止时间、展示内容或数据无效 |
+| 500         | `internal_error`        | 服务内部异常                                  |
 
-Framework errors such as unknown paths or unsupported methods use `http_error` with their corresponding HTTP status.
-Authentication failures include a `WWW-Authenticate: Basic` header.
+路径不存在、方法不支持等框架错误使用 `http_error`，状态码与具体错误对应。
+鉴权失败时返回 `WWW-Authenticate: Basic` 响应头。
+
+## Python SDK
+
+[sdk/approval_center_sdk.py](sdk/approval_center_sdk.py) 可直接复制到接入方项目。
+SDK 支持 Python 3.9 及以上版本，依赖 HTTPX 和 Pydantic v2，提供同步与异步客户端。
+每个接口接收对应的 Request 模型，返回对应的 Response 模型。

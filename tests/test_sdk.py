@@ -34,7 +34,7 @@ class SdkTests(unittest.TestCase):
 		self.created = api.CreateApprovalResponse(
 			approval_id=1, reference_key='survival/Steve', status=ApprovalStatus.PENDING, created_at=1000, expires_at=1100, updated_at=1000,
 		)
-		self.approval = api.ApprovalResponse(
+		self.approval = api.ApprovalInfo(
 			**self.created.model_dump(), client_id='client', content=ApprovalContent(title='申请', description='理由'),
 			decision=None, data=b'\x00\xff', data_version=0,
 		)
@@ -51,10 +51,10 @@ class SdkTests(unittest.TestCase):
 		self.responses = [
 			httpx.Response(201, content=self.created.model_dump_json()),
 			httpx.Response(200, content=self.approval.model_dump_json()),
-			httpx.Response(200, content=api.ApprovalListResponse(items=[self.approval], limit=2, offset=3).model_dump_json()),
-			httpx.Response(200, content=api.ApprovalDataResponse(data=b'\x00\xff', version=0, updated_at=1000).model_dump_json()),
-			httpx.Response(200, content=api.ReplaceDataResponse(version=1, updated_at=1001).model_dump_json()),
-			httpx.Response(200, content=api.ReplaceDataResponse(version=2, updated_at=1001).model_dump_json()),
+			httpx.Response(200, content=api.ListApprovalsResponse(items=[self.approval], limit=2, offset=3).model_dump_json()),
+			httpx.Response(200, content=api.GetApprovalDataResponse(data=b'\x00\xff', version=0, updated_at=1000).model_dump_json()),
+			httpx.Response(200, content=api.SetApprovalDataResponse(version=1, updated_at=1001).model_dump_json()),
+			httpx.Response(200, content=api.SetApprovalDataResponse(version=2, updated_at=1001).model_dump_json()),
 		]
 		client = self.make_client()
 		with client:
@@ -62,22 +62,29 @@ class SdkTests(unittest.TestCase):
 				content=sdk.ApprovalContent(title='申请', description='理由'), expires_at=1100, data=b'\x00\xff', reference_key='survival/Steve',
 			))
 			self.assertEqual(created.approval_id, 1)
+			self.assertIsInstance(created, sdk.CreateApprovalResponse)
 			self.assertEqual(created.reference_key, 'survival/Steve')
 			self.assertIs(created.status, sdk.ApprovalStatus.PENDING)
-			approval = client.get_approval(sdk.ApprovalIdRequest(approval_id=created.approval_id))
+			approval = client.get_approval(sdk.GetApprovalRequest(approval_id=created.approval_id))
+			self.assertIsInstance(approval, sdk.GetApprovalResponse)
 			self.assertEqual(approval.data, b'\x00\xff')
 			self.assertEqual(approval.content.title, '申请')
 			self.assertEqual(approval.reference_key, 'survival/Steve')
-			page = client.list_approvals(sdk.ApprovalListRequest(
+			page = client.list_approvals(sdk.ListApprovalsRequest(
 				status=sdk.ApprovalStatus.PENDING, reference_key='survival/Steve', created_from=1000, created_before=1100,
 				updated_from=1001, updated_before=1101, limit=2, offset=3, all_clients=True,
 			))
-			self.assertEqual(page.items, [approval])
+			self.assertIsInstance(page, sdk.ListApprovalsResponse)
+			self.assertEqual(page.items, [sdk.ApprovalInfo.model_validate(approval.model_dump())])
 			self.assertEqual(page.limit, 2)
 			self.assertEqual(page.offset, 3)
-			self.assertEqual(client.get_approval_data(sdk.ApprovalIdRequest(approval_id=1)).data, b'\x00\xff')
-			self.assertEqual(client.set_approval_data(sdk.ReplaceDataRequest(approval_id=1, data=b'new', expected_version=0)).version, 1)
-			self.assertEqual(client.set_approval_data(sdk.ReplaceDataRequest(approval_id=1, data=b'')).version, 2)
+			data = client.get_approval_data(sdk.GetApprovalDataRequest(approval_id=1))
+			self.assertIsInstance(data, sdk.GetApprovalDataResponse)
+			self.assertEqual(data.data, b'\x00\xff')
+			replaced = client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=1, data=b'new', expected_version=0))
+			self.assertIsInstance(replaced, sdk.SetApprovalDataResponse)
+			self.assertEqual(replaced.version, 1)
+			self.assertEqual(client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=1, data=b'')).version, 2)
 		for request in self.requests:
 			self.assertEqual(request.headers['Authorization'], 'Basic ' + base64.b64encode(b'client:secret').decode('ascii'))
 			self.assertTrue(request.url.path.startswith('/prefix/api/v1/'))
@@ -90,10 +97,10 @@ class SdkTests(unittest.TestCase):
 			'status=pending&reference_key=survival%2FSteve&created_from=1000&created_before=1100&updated_from=1001&updated_before=1101&limit=2&offset=3&all=true')
 		self.assertEqual(self.requests[3].url.path, '/prefix/api/v1/approval-data/1')
 		self.assertEqual(self.requests[4].method, 'PUT')
-		self.assertEqual(api.ReplaceDataRequest.model_validate_json(self.requests[4].content).expected_version, 0)
-		self.assertIsNone(api.ReplaceDataRequest.model_validate_json(self.requests[5].content).expected_version)
+		self.assertEqual(api.SetApprovalDataRequest.model_validate_json(self.requests[4].content).expected_version, 0)
+		self.assertIsNone(api.SetApprovalDataRequest.model_validate_json(self.requests[5].content).expected_version)
 		with self.assertRaises(RuntimeError):
-			client.get_approval(sdk.ApprovalIdRequest(approval_id=1))
+			client.get_approval(sdk.GetApprovalRequest(approval_id=1))
 
 	def test_http_errors_preserve_response_without_retry(self) -> None:
 		cases = (
@@ -105,7 +112,7 @@ class SdkTests(unittest.TestCase):
 				self.responses = [httpx.Response(status, content=api.ErrorResponse(code=code, message='details').model_dump_json())]
 				with self.make_client() as client:
 					with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
-						client.set_approval_data(sdk.ReplaceDataRequest(approval_id=1, data=b'data', expected_version=0))
+						client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=1, data=b'data', expected_version=0))
 				self.assertIsInstance(caught.exception, httpx.HTTPStatusError)
 				self.assertEqual(caught.exception.status_code, status)
 				self.assertEqual(caught.exception.code, code)
@@ -125,7 +132,7 @@ class SdkTests(unittest.TestCase):
 				self.responses = [httpx.Response(502, content=content)]
 				with self.make_client() as client:
 					with self.assertRaises(httpx.HTTPStatusError) as caught:
-						client.get_approval(sdk.ApprovalIdRequest(approval_id=1))
+						client.get_approval(sdk.GetApprovalRequest(approval_id=1))
 				self.assertNotIsInstance(caught.exception, sdk.ApprovalCenterAPIError)
 				self.assertEqual(caught.exception.response.status_code, 502)
 				self.assertEqual(caught.exception.response.text, content)
@@ -136,7 +143,8 @@ class SdkTests(unittest.TestCase):
 		})
 		self.responses = [httpx.Response(200, content=cancelled.model_dump_json())]
 		with self.make_client() as client:
-			response = client.cancel_approval(sdk.ApprovalIdRequest(approval_id=1))
+			response = client.cancel_approval(sdk.CancelApprovalRequest(approval_id=1))
+		self.assertIsInstance(response, sdk.CancelApprovalResponse)
 		self.assertIs(response.status, sdk.ApprovalStatus.CANCELLED)
 		self.assertEqual(response.decision.decided_at, 1001)
 		self.assertIsNone(response.decision.reviewer_id)
@@ -169,11 +177,11 @@ class SdkTests(unittest.TestCase):
 			httpx.Response(200, json={'data': 'invalid!', 'version': 0, 'updated_at': 1000}),
 		]
 		with self.make_client() as client:
-			self.assertEqual(client.get_approval(sdk.ApprovalIdRequest(approval_id=1)).data, b'\x00\xff')
+			self.assertEqual(client.get_approval(sdk.GetApprovalRequest(approval_id=1)).data, b'\x00\xff')
 			with self.assertRaises(ValidationError):
-				client.get_approval(sdk.ApprovalIdRequest(approval_id=1))
+				client.get_approval(sdk.GetApprovalRequest(approval_id=1))
 			with self.assertRaises(ValidationError):
-				client.get_approval_data(sdk.ApprovalIdRequest(approval_id=1))
+				client.get_approval_data(sdk.GetApprovalDataRequest(approval_id=1))
 
 	def test_content_validation_matches_server(self) -> None:
 		for title in ('Approval', '审批', '😀' * 128, '😀' * 129, ' ', 'x' * 257):
@@ -237,44 +245,44 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 				content=sdk.ApprovalContent(title='申请回档', fields=(sdk.DisplayField(name='玩家', value='Steve'),)),
 				expires_at=1100, data=b'\x00\xff',
 			))
-			request = sdk.ApprovalIdRequest(approval_id=created.approval_id)
+			request = sdk.GetApprovalRequest(approval_id=created.approval_id)
 			approval = await client.get_approval(request)
 			self.assertEqual(approval.data, b'\x00\xff')
 			self.assertEqual(approval.content.fields[0].value, 'Steve')
 			self.assertIsNone(approval.decision)
-			page = await client.list_approvals(sdk.ApprovalListRequest(status=sdk.ApprovalStatus.PENDING, created_from=1000, created_before=1001))
-			self.assertEqual(page.items, [approval])
-			self.assertEqual((await client.list_approvals(sdk.ApprovalListRequest(offset=1))).items, [])
-			data = await client.get_approval_data(request)
+			page = await client.list_approvals(sdk.ListApprovalsRequest(status=sdk.ApprovalStatus.PENDING, created_from=1000, created_before=1001))
+			self.assertEqual(page.items, [sdk.ApprovalInfo.model_validate(approval.model_dump())])
+			self.assertEqual((await client.list_approvals(sdk.ListApprovalsRequest(offset=1))).items, [])
+			data = await client.get_approval_data(sdk.GetApprovalDataRequest(approval_id=request.approval_id))
 			self.assertEqual(data.data, b'\x00\xff')
 			self.assertEqual(data.version, 0)
 			self.now = 1001
-			replaced = await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'new', expected_version=data.version))
+			replaced = await client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=created.approval_id, data=b'new', expected_version=data.version))
 			self.assertEqual(replaced.version, 1)
 			self.assertEqual(replaced.updated_at, 1001)
 			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
-				await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'stale', expected_version=0))
+				await client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=created.approval_id, data=b'stale', expected_version=0))
 			self.assertEqual(caught.exception.response.status_code, 409)
 			self.assertEqual(caught.exception.code, 'data_version_conflict')
 			self.assertEqual(caught.exception.message, 'Custom data version does not match')
-			self.assertEqual((await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b''))).version, 2)
-			self.assertEqual((await client.get_approval_data(request)).data, b'')
+			self.assertEqual((await client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=created.approval_id, data=b''))).version, 2)
+			self.assertEqual((await client.get_approval_data(sdk.GetApprovalDataRequest(approval_id=request.approval_id))).data, b'')
 			self.now = 1100
 			timed_out = await client.get_approval(request)
 			self.assertIs(timed_out.status, sdk.ApprovalStatus.TIMED_OUT)
 			self.assertIsNotNone(timed_out.decision)
 			self.assertIsNone(timed_out.decision.reviewer_id)
 			self.assertEqual(timed_out.decision.decided_at, 1100)
-			self.assertEqual((await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'terminal'))).version, 3)
+			self.assertEqual((await client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=created.approval_id, data=b'terminal'))).version, 3)
 		with self.assertRaises(RuntimeError):
 			await client.get_approval(request)
 
 	async def test_actual_api_auth_and_admin_permissions(self) -> None:
 		async with self.make_client() as owner:
 			created = await owner.create_approval(sdk.CreateApprovalRequest(content=sdk.ApprovalContent(title='Approval'), expires_at=1100))
-			request = sdk.ApprovalIdRequest(approval_id=created.approval_id)
+			request = sdk.GetApprovalRequest(approval_id=created.approval_id)
 			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
-				await owner.list_approvals(sdk.ApprovalListRequest(all_clients=True))
+				await owner.list_approvals(sdk.ListApprovalsRequest(all_clients=True))
 			self.assertEqual(caught.exception.response.status_code, 403)
 		async with self.make_client('other') as other:
 			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
@@ -285,10 +293,10 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 				await invalid.get_approval(request)
 			self.assertEqual(caught.exception.response.status_code, 401)
 		async with self.make_client('admin') as admin:
-			self.assertEqual((await admin.list_approvals(sdk.ApprovalListRequest())).items, [])
-			self.assertEqual(len((await admin.list_approvals(sdk.ApprovalListRequest(all_clients=True))).items), 1)
+			self.assertEqual((await admin.list_approvals(sdk.ListApprovalsRequest())).items, [])
+			self.assertEqual(len((await admin.list_approvals(sdk.ListApprovalsRequest(all_clients=True))).items), 1)
 			self.assertEqual((await admin.get_approval(request)).client_id, 'owner')
-			self.assertEqual((await admin.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'admin'))).version, 1)
+			self.assertEqual((await admin.set_approval_data(sdk.SetApprovalDataRequest(approval_id=created.approval_id, data=b'admin'))).version, 1)
 
 	async def test_actual_api_reference_key_query_semantics(self) -> None:
 		async with self.make_client() as client:
@@ -299,22 +307,22 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 				content=sdk.ApprovalContent(title='Keyed'), expires_at=1100, reference_key=key,
 			))
 			self.assertEqual(second.reference_key, key)
-			page = await client.list_approvals(sdk.ApprovalListRequest(reference_key=key))
+			page = await client.list_approvals(sdk.ListApprovalsRequest(reference_key=key))
 			self.assertEqual([item.approval_id for item in page.items], [second.approval_id])
 			self.assertEqual(page.items[0].reference_key, key)
-			page = await client.list_approvals(sdk.ApprovalListRequest(reference_key=None))
+			page = await client.list_approvals(sdk.ListApprovalsRequest(reference_key=None))
 			self.assertEqual(len(page.items), 2)
 			self.assertIsNone(page.items[-1].reference_key)
-			self.assertEqual((await client.list_approvals(sdk.ApprovalListRequest(reference_key='null'))).items, [])
-			await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=second.approval_id, data=b'updated'))
-			self.assertEqual((await client.get_approval(sdk.ApprovalIdRequest(approval_id=second.approval_id))).reference_key, key)
+			self.assertEqual((await client.list_approvals(sdk.ListApprovalsRequest(reference_key='null'))).items, [])
+			await client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=second.approval_id, data=b'updated'))
+			self.assertEqual((await client.get_approval(sdk.GetApprovalRequest(approval_id=second.approval_id))).reference_key, key)
 
 	async def test_actual_api_cancel(self) -> None:
 		async with self.make_client() as client:
 			created = await client.create_approval(sdk.CreateApprovalRequest(
 				content=sdk.ApprovalContent(title='Approval'), expires_at=1100, data=b'\xff', reference_key='survival/Steve',
 			))
-			request = sdk.ApprovalIdRequest(approval_id=created.approval_id)
+			request = sdk.CancelApprovalRequest(approval_id=created.approval_id)
 			async with self.make_client('other') as other:
 				with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 					await other.cancel_approval(request)
@@ -328,13 +336,13 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			self.assertEqual(cancelled.reference_key, 'survival/Steve')
 			self.now = 1002
 			self.assertEqual(await client.cancel_approval(request), cancelled)
-			page = await client.list_approvals(sdk.ApprovalListRequest(status=sdk.ApprovalStatus.CANCELLED))
-			self.assertEqual(page.items, [cancelled])
-			self.assertEqual((await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'new'))).version, 1)
+			page = await client.list_approvals(sdk.ListApprovalsRequest(status=sdk.ApprovalStatus.CANCELLED))
+			self.assertEqual(page.items, [sdk.ApprovalInfo.model_validate(cancelled.model_dump())])
+			self.assertEqual((await client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=created.approval_id, data=b'new'))).version, 1)
 			pending = await client.create_approval(sdk.CreateApprovalRequest(content=sdk.ApprovalContent(title='Timeout'), expires_at=1100))
 			self.now = 1100
 			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
-				await client.cancel_approval(sdk.ApprovalIdRequest(approval_id=pending.approval_id))
+				await client.cancel_approval(sdk.CancelApprovalRequest(approval_id=pending.approval_id))
 			self.assertEqual(caught.exception.status_code, 409)
 			self.assertEqual(caught.exception.code, 'approval_not_pending')
 
@@ -347,9 +355,9 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 		with patch.object(sdk.httpx, 'AsyncClient', partial(ASYNC_HTTP_CLIENT, transport=httpx.MockTransport(fail))):
 			async with sdk.AsyncApprovalCenterClient('https://center.example', 'client', 'secret') as client:
 				with self.assertRaises(httpx.ConnectError) as caught:
-					await client.get_approval(sdk.ApprovalIdRequest(approval_id=1))
+					await client.get_approval(sdk.GetApprovalRequest(approval_id=1))
 				self.assertIs(caught.exception, error)
 		with patch.object(sdk.httpx, 'AsyncClient', partial(ASYNC_HTTP_CLIENT, transport=httpx.MockTransport(lambda request: httpx.Response(200, content='not JSON')))):
 			async with sdk.AsyncApprovalCenterClient('https://center.example', 'client', 'secret') as client:
 				with self.assertRaises(ValidationError):
-					await client.get_approval(sdk.ApprovalIdRequest(approval_id=1))
+					await client.get_approval(sdk.GetApprovalRequest(approval_id=1))

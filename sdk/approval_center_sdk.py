@@ -15,10 +15,14 @@ import httpx
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, ValidationError, WithJsonSchema, model_validator
 
 __all__ = [
-	'ApprovalStatus', 'DisplayField', 'ApprovalContent', 'ApprovalIdRequest', 'ApprovalListRequest',
+	'ApprovalStatus', 'DisplayField', 'ApprovalContent', 'DecisionInfo', 'ApprovalInfo',
 	'CreateApprovalRequest', 'CreateApprovalResponse',
-	'DecisionInfo', 'ApprovalResponse', 'ApprovalListResponse', 'ApprovalDataResponse',
-	'ReplaceDataRequest', 'ReplaceDataResponse', 'ErrorResponse', 'ApprovalCenterAPIError',
+	'GetApprovalRequest', 'GetApprovalResponse',
+	'ListApprovalsRequest', 'ListApprovalsResponse',
+	'CancelApprovalRequest', 'CancelApprovalResponse',
+	'GetApprovalDataRequest', 'GetApprovalDataResponse',
+	'SetApprovalDataRequest', 'SetApprovalDataResponse',
+	'ErrorResponse', 'ApprovalCenterAPIError',
 	'ApprovalCenterClient', 'AsyncApprovalCenterClient',
 ]
 
@@ -130,7 +134,13 @@ class DecisionInfo(_ApiModel):
 	decided_at: int
 
 
-class ApprovalResponse(CreateApprovalResponse):
+class ApprovalInfo(_ApiModel):
+	approval_id: int
+	reference_key: Optional[str]
+	status: ApprovalStatus
+	created_at: int
+	expires_at: int
+	updated_at: int
 	client_id: str
 	content: ApprovalContent
 	decision: Optional[DecisionInfo]
@@ -138,34 +148,23 @@ class ApprovalResponse(CreateApprovalResponse):
 	data_version: int
 
 
-class ApprovalListResponse(_ApiModel):
-	items: list[ApprovalResponse]
-	limit: int
-	offset: int
-
-
-class ApprovalDataResponse(_ApiModel):
-	data: _Base64Data
-	version: int
-	updated_at: int
-
-
-class ApprovalIdRequest(_RequestModel):
-	# Path parameters are not part of the JSON body.
+class GetApprovalRequest(_RequestModel):
 	approval_id: int = Field(strict=True, ge=1, le=_MAX_SQLITE_INTEGER, exclude=True)
 
 
-class ReplaceDataRequest(ApprovalIdRequest):
-	data: _Base64Data
-	expected_version: Optional[int] = Field(default=None, strict=True, ge=0, le=_MAX_SQLITE_INTEGER)
+class GetApprovalResponse(ApprovalInfo):
+	pass
 
 
-class ReplaceDataResponse(_ApiModel):
-	version: int
-	updated_at: int
+class CancelApprovalRequest(_RequestModel):
+	approval_id: int = Field(strict=True, ge=1, le=_MAX_SQLITE_INTEGER, exclude=True)
 
 
-class ApprovalListRequest(_RequestModel):
+class CancelApprovalResponse(ApprovalInfo):
+	pass
+
+
+class ListApprovalsRequest(_RequestModel):
 	status: Optional[ApprovalStatus] = None
 	reference_key: Optional[str] = None
 	created_from: Optional[_UnixTime] = None
@@ -175,6 +174,34 @@ class ApprovalListRequest(_RequestModel):
 	limit: int = Field(default=100, strict=True, ge=1, le=1000)
 	offset: int = Field(default=0, strict=True, ge=0, le=_MAX_SQLITE_INTEGER)
 	all_clients: bool = Field(default=False, serialization_alias='all')
+
+
+class ListApprovalsResponse(_ApiModel):
+	items: list[ApprovalInfo]
+	limit: int
+	offset: int
+
+
+class GetApprovalDataRequest(_RequestModel):
+	approval_id: int = Field(strict=True, ge=1, le=_MAX_SQLITE_INTEGER, exclude=True)
+
+
+class GetApprovalDataResponse(_ApiModel):
+	data: _Base64Data
+	version: int
+	updated_at: int
+
+
+class SetApprovalDataRequest(_RequestModel):
+	# Path parameters are not part of the JSON body.
+	approval_id: int = Field(strict=True, ge=1, le=_MAX_SQLITE_INTEGER, exclude=True)
+	data: _Base64Data
+	expected_version: Optional[int] = Field(default=None, strict=True, ge=0, le=_MAX_SQLITE_INTEGER)
+
+
+class SetApprovalDataResponse(_ApiModel):
+	version: int
+	updated_at: int
 
 
 def _parse_response(response: httpx.Response, response_type: type[_Response]) -> _Response:
@@ -207,7 +234,7 @@ class ApprovalCenterClient:
 
 	def _request(
 		self, method: str, path: str, response_type: type[_Response], *,
-		body: Optional[_RequestModel] = None, query: Optional[ApprovalListRequest] = None,
+		body: Optional[_RequestModel] = None, query: Optional[ListApprovalsRequest] = None,
 	) -> _Response:
 		response = self._http.request(
 			method, path,
@@ -220,26 +247,26 @@ class ApprovalCenterClient:
 		"""Create an approval. expires_at is the absolute deadline in Unix seconds."""
 		return self._request('POST', '/api/v1/approval', CreateApprovalResponse, body=request)
 
-	def get_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
-		return self._request('GET', f'/api/v1/approval/{request.approval_id}', ApprovalResponse)
+	def get_approval(self, request: GetApprovalRequest) -> GetApprovalResponse:
+		return self._request('GET', f'/api/v1/approval/{request.approval_id}', GetApprovalResponse)
 
-	def cancel_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
+	def cancel_approval(self, request: CancelApprovalRequest) -> CancelApprovalResponse:
 		"""Cancel a pending approval. Repeated cancellation preserves the terminal time."""
-		return self._request('POST', f'/api/v1/approval/{request.approval_id}/cancel', ApprovalResponse)
+		return self._request('POST', f'/api/v1/approval/{request.approval_id}/cancel', CancelApprovalResponse)
 
-	def list_approvals(self, request: ApprovalListRequest) -> ApprovalListResponse:
+	def list_approvals(self, request: ListApprovalsRequest) -> ListApprovalsResponse:
 		"""Fetch one page. Time ranges include their start and exclude their end.
 
 		all_clients requires an administrator client; results are newest first.
 		"""
-		return self._request('GET', '/api/v1/approval', ApprovalListResponse, query=request)
+		return self._request('GET', '/api/v1/approval', ListApprovalsResponse, query=request)
 
-	def get_approval_data(self, request: ApprovalIdRequest) -> ApprovalDataResponse:
-		return self._request('GET', f'/api/v1/approval-data/{request.approval_id}', ApprovalDataResponse)
+	def get_approval_data(self, request: GetApprovalDataRequest) -> GetApprovalDataResponse:
+		return self._request('GET', f'/api/v1/approval-data/{request.approval_id}', GetApprovalDataResponse)
 
-	def set_approval_data(self, request: ReplaceDataRequest) -> ReplaceDataResponse:
+	def set_approval_data(self, request: SetApprovalDataRequest) -> SetApprovalDataResponse:
 		"""Replace all bytes. Omit expected_version for an unconditional overwrite."""
-		return self._request('PUT', f'/api/v1/approval-data/{request.approval_id}', ReplaceDataResponse, body=request)
+		return self._request('PUT', f'/api/v1/approval-data/{request.approval_id}', SetApprovalDataResponse, body=request)
 
 
 class AsyncApprovalCenterClient:
@@ -260,7 +287,7 @@ class AsyncApprovalCenterClient:
 
 	async def _request(
 		self, method: str, path: str, response_type: type[_Response], *,
-		body: Optional[_RequestModel] = None, query: Optional[ApprovalListRequest] = None,
+		body: Optional[_RequestModel] = None, query: Optional[ListApprovalsRequest] = None,
 	) -> _Response:
 		response = await self._http.request(
 			method, path,
@@ -273,23 +300,23 @@ class AsyncApprovalCenterClient:
 		"""Create an approval. expires_at is the absolute deadline in Unix seconds."""
 		return await self._request('POST', '/api/v1/approval', CreateApprovalResponse, body=request)
 
-	async def get_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
-		return await self._request('GET', f'/api/v1/approval/{request.approval_id}', ApprovalResponse)
+	async def get_approval(self, request: GetApprovalRequest) -> GetApprovalResponse:
+		return await self._request('GET', f'/api/v1/approval/{request.approval_id}', GetApprovalResponse)
 
-	async def cancel_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
+	async def cancel_approval(self, request: CancelApprovalRequest) -> CancelApprovalResponse:
 		"""Cancel a pending approval. Repeated cancellation preserves the terminal time."""
-		return await self._request('POST', f'/api/v1/approval/{request.approval_id}/cancel', ApprovalResponse)
+		return await self._request('POST', f'/api/v1/approval/{request.approval_id}/cancel', CancelApprovalResponse)
 
-	async def list_approvals(self, request: ApprovalListRequest) -> ApprovalListResponse:
+	async def list_approvals(self, request: ListApprovalsRequest) -> ListApprovalsResponse:
 		"""Fetch one page. Time ranges include their start and exclude their end.
 
 		all_clients requires an administrator client; results are newest first.
 		"""
-		return await self._request('GET', '/api/v1/approval', ApprovalListResponse, query=request)
+		return await self._request('GET', '/api/v1/approval', ListApprovalsResponse, query=request)
 
-	async def get_approval_data(self, request: ApprovalIdRequest) -> ApprovalDataResponse:
-		return await self._request('GET', f'/api/v1/approval-data/{request.approval_id}', ApprovalDataResponse)
+	async def get_approval_data(self, request: GetApprovalDataRequest) -> GetApprovalDataResponse:
+		return await self._request('GET', f'/api/v1/approval-data/{request.approval_id}', GetApprovalDataResponse)
 
-	async def set_approval_data(self, request: ReplaceDataRequest) -> ReplaceDataResponse:
+	async def set_approval_data(self, request: SetApprovalDataRequest) -> SetApprovalDataResponse:
 		"""Replace all bytes. Omit expected_version for an unconditional overwrite."""
-		return await self._request('PUT', f'/api/v1/approval-data/{request.approval_id}', ReplaceDataResponse, body=request)
+		return await self._request('PUT', f'/api/v1/approval-data/{request.approval_id}', SetApprovalDataResponse, body=request)

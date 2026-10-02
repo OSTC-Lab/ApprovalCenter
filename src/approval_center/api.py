@@ -3,7 +3,7 @@ import binascii
 import logging
 import secrets
 from dataclasses import dataclass
-from typing import Annotated, Callable, Literal, Mapping
+from typing import Annotated, Callable, Literal, Mapping, Self
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -66,7 +66,13 @@ class DecisionInfo(ApiModel):
 	decided_at: int
 
 
-class ApprovalResponse(CreateApprovalResponse):
+class ApprovalInfo(ApiModel):
+	approval_id: int
+	reference_key: str | None
+	status: ApprovalStatus
+	created_at: int
+	expires_at: int
+	updated_at: int
 	client_id: str
 	content: ApprovalContent
 	decision: DecisionInfo | None
@@ -74,7 +80,7 @@ class ApprovalResponse(CreateApprovalResponse):
 	data_version: int
 
 	@classmethod
-	def of(cls, approval: Approval) -> 'ApprovalResponse':
+	def of(cls, approval: Approval) -> Self:
 		decision = None if approval.decided_at is None else DecisionInfo(reviewer_id=approval.reviewer_id, decided_at=approval.decided_at)
 		return cls(
 			approval_id=approval.approval_id, status=approval.status, client_id=approval.client_id, reference_key=approval.reference_key,
@@ -83,24 +89,57 @@ class ApprovalResponse(CreateApprovalResponse):
 		)
 
 
-class ApprovalListResponse(ApiModel):
-	items: list[ApprovalResponse]
+class GetApprovalRequest(ApiModel):
+	approval_id: int = Field(ge=1, le=MAX_SQLITE_INTEGER)
+
+
+class GetApprovalResponse(ApprovalInfo):
+	pass
+
+
+class CancelApprovalRequest(ApiModel):
+	approval_id: int = Field(ge=1, le=MAX_SQLITE_INTEGER)
+
+
+class CancelApprovalResponse(ApprovalInfo):
+	pass
+
+
+class ListApprovalsRequest(ApiModel):
+	model_config = ConfigDict(extra='ignore', frozen=True, populate_by_name=True)
+	status: ApprovalStatus | None = None
+	reference_key: str | None = None
+	created_from: int | None = Field(default=None, ge=0, le=MAX_SQLITE_INTEGER)
+	created_before: int | None = Field(default=None, ge=0, le=MAX_SQLITE_INTEGER)
+	updated_from: int | None = Field(default=None, ge=0, le=MAX_SQLITE_INTEGER)
+	updated_before: int | None = Field(default=None, ge=0, le=MAX_SQLITE_INTEGER)
+	limit: int = Field(default=100, ge=1, le=1000)
+	offset: int = Field(default=0, ge=0, le=MAX_SQLITE_INTEGER)
+	all_clients: bool = Field(default=False, alias='all')
+
+
+class ListApprovalsResponse(ApiModel):
+	items: list[ApprovalInfo]
 	limit: int
 	offset: int
 
 
-class ApprovalDataResponse(ApiModel):
+class GetApprovalDataRequest(ApiModel):
+	approval_id: int = Field(ge=1, le=MAX_SQLITE_INTEGER)
+
+
+class GetApprovalDataResponse(ApiModel):
 	data: Base64Data
 	version: int
 	updated_at: int
 
 
-class ReplaceDataRequest(ApiModel):
+class SetApprovalDataRequest(ApiModel):
 	data: Base64Data
 	expected_version: int | None = Field(default=None, strict=True, ge=0, le=MAX_SQLITE_INTEGER)
 
 
-class ReplaceDataResponse(ApiModel):
+class SetApprovalDataResponse(ApiModel):
 	version: int
 	updated_at: int
 
@@ -110,7 +149,11 @@ class ErrorResponse(ApiModel):
 	message: str
 
 
-class HealthResponse(ApiModel):
+class GetHealthRequest(ApiModel):
+	pass
+
+
+class GetHealthResponse(ApiModel):
 	status: Literal['ok', 'degraded']
 	service: bool
 	database: bool
@@ -169,45 +212,41 @@ def install_api(app: FastAPI, config: Config, service_provider: Callable[[], App
 			expires_at=approval.expires_at, updated_at=approval.updated_at,
 		)
 
-	@app.get('/api/v1/approval', response_model=ApprovalListResponse)
+	@app.get('/api/v1/approval', response_model=ListApprovalsResponse)
 	async def list_approvals(
-		client: Client, status: ApprovalStatus | None = None, reference_key: str | None = None,
-		created_from: Annotated[int | None, Query(ge=0, le=MAX_SQLITE_INTEGER)] = None,
-		created_before: Annotated[int | None, Query(ge=0, le=MAX_SQLITE_INTEGER)] = None,
-		updated_from: Annotated[int | None, Query(ge=0, le=MAX_SQLITE_INTEGER)] = None,
-		updated_before: Annotated[int | None, Query(ge=0, le=MAX_SQLITE_INTEGER)] = None,
-		limit: Annotated[int, Query(ge=1, le=1000)] = 100, offset: Annotated[int, Query(ge=0, le=MAX_SQLITE_INTEGER)] = 0,
-		all: bool = False,
-	) -> ApprovalListResponse:
+		request: Annotated[ListApprovalsRequest, Query()], client: Client,
+	) -> ListApprovalsResponse:
 		filters = ApprovalFilter(
-			status=status, reference_key=reference_key, created_from=created_from, created_before=created_before,
-			updated_from=updated_from, updated_before=updated_before, limit=limit, offset=offset, all_clients=all,
+			status=request.status, reference_key=request.reference_key,
+			created_from=request.created_from, created_before=request.created_before,
+			updated_from=request.updated_from, updated_before=request.updated_before,
+			limit=request.limit, offset=request.offset, all_clients=request.all_clients,
 		)
 		items = await service_provider().list_approvals(client, filters)
-		return ApprovalListResponse(items=[ApprovalResponse.of(item) for item in items], limit=limit, offset=offset)
+		return ListApprovalsResponse(items=[ApprovalInfo.of(item) for item in items], limit=request.limit, offset=request.offset)
 
-	@app.get('/api/v1/approval/{approval_id}', response_model=ApprovalResponse)
-	async def get_approval(approval_id: ApprovalId, client: Client) -> ApprovalResponse:
-		return ApprovalResponse.of(await service_provider().get(client, approval_id))
+	@app.get('/api/v1/approval/{approval_id}', response_model=GetApprovalResponse)
+	async def get_approval(request: Annotated[GetApprovalRequest, Depends()], client: Client) -> GetApprovalResponse:
+		return GetApprovalResponse.of(await service_provider().get(client, request.approval_id))
 
-	@app.post('/api/v1/approval/{approval_id}/cancel', response_model=ApprovalResponse)
-	async def cancel_approval(approval_id: ApprovalId, client: Client) -> ApprovalResponse:
-		return ApprovalResponse.of(await service_provider().cancel(client, approval_id))
+	@app.post('/api/v1/approval/{approval_id}/cancel', response_model=CancelApprovalResponse)
+	async def cancel_approval(request: Annotated[CancelApprovalRequest, Depends()], client: Client) -> CancelApprovalResponse:
+		return CancelApprovalResponse.of(await service_provider().cancel(client, request.approval_id))
 
-	@app.get('/api/v1/approval-data/{approval_id}', response_model=ApprovalDataResponse)
-	async def get_data(approval_id: ApprovalId, client: Client) -> ApprovalDataResponse:
-		approval = await service_provider().get(client, approval_id)
-		return ApprovalDataResponse(data=approval.data, version=approval.data_version, updated_at=approval.updated_at)
+	@app.get('/api/v1/approval-data/{approval_id}', response_model=GetApprovalDataResponse)
+	async def get_approval_data(request: Annotated[GetApprovalDataRequest, Depends()], client: Client) -> GetApprovalDataResponse:
+		approval = await service_provider().get(client, request.approval_id)
+		return GetApprovalDataResponse(data=approval.data, version=approval.data_version, updated_at=approval.updated_at)
 
-	@app.put('/api/v1/approval-data/{approval_id}', response_model=ReplaceDataResponse)
-	async def replace_data(approval_id: ApprovalId, body: ReplaceDataRequest, client: Client) -> ReplaceDataResponse:
+	@app.put('/api/v1/approval-data/{approval_id}', response_model=SetApprovalDataResponse)
+	async def set_approval_data(approval_id: ApprovalId, body: SetApprovalDataRequest, client: Client) -> SetApprovalDataResponse:
 		approval = await service_provider().replace_data(client, approval_id, body.data, body.expected_version)
-		return ReplaceDataResponse(version=approval.data_version, updated_at=approval.updated_at)
+		return SetApprovalDataResponse(version=approval.data_version, updated_at=approval.updated_at)
 
-	@app.get('/heathz', response_model=HealthResponse)
-	async def health() -> JSONResponse:
+	@app.get('/heathz', response_model=GetHealthResponse)
+	async def get_health(request: Annotated[GetHealthRequest, Depends()]) -> JSONResponse:
 		database = await service_provider().storage.healthy()
 		runtime = health_provider()
 		ok = database and runtime.discord_ready and runtime.maintenance_healthy
-		response = HealthResponse(status='ok' if ok else 'degraded', service=True, database=database, discord=runtime.discord_ready, maintenance=runtime.maintenance_healthy)
+		response = GetHealthResponse(status='ok' if ok else 'degraded', service=True, database=database, discord=runtime.discord_ready, maintenance=runtime.maintenance_healthy)
 		return JSONResponse(response.model_dump(mode='json'), status_code=200 if ok else 503)
