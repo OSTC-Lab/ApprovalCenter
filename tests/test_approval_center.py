@@ -22,7 +22,7 @@ from pydantic import SecretStr, ValidationError
 from approval_center.api import RuntimeHealth, install_api
 from approval_center.approval import ApprovalContent, ApprovalError, ApprovalFilter, ApprovalService, ApprovalStatus, DisplayField, MessageSnapshot, MessageSyncResult
 from approval_center.config import ClientConfig, Config, DiscordConfig, PolicyConfig, ServiceConfig, load_config
-from approval_center.discord import ApprovalBot, DecisionButton, card_view, render_card, render_message_content
+from approval_center.discord import ApprovalBot, DecisionButton, card_view, render_cards, status_text
 from approval_center.maintenance import Maintenance
 from approval_center.runtime import create_app
 from approval_center.storage import Storage
@@ -256,9 +256,9 @@ class ApprovalTests(ApprovalFixture):
 		self.assertEqual(cancelled.data, approval.data)
 		self.assertEqual(cancelled.data_version, approval.data_version)
 		snapshot = (await self.service.pending_messages())[0]
-		card = render_card(snapshot, 'PrimeBackup')
+		card = render_cards(snapshot, 'PrimeBackup')[0]
 		self.assertIn('已取消', card.footer.text)
-		self.assertIn('取消时间：<t:1001:F>', render_message_content(snapshot))
+		self.assertIn('取消时间：<t:1001:F>', card.fields[-1].value)
 		self.assertTrue(all(child.item.disabled for child in card_view(approval.approval_id, cancelled.status).children))
 		await self.maintenance.run_once()
 		self.assertEqual(self.publisher.snapshots[-1].approval.status, ApprovalStatus.CANCELLED)
@@ -475,12 +475,14 @@ class ApprovalTests(ApprovalFixture):
 	async def test_card_and_restart_dispatch(self) -> None:
 		await self.create()
 		snapshot = (await self.service.pending_messages())[0]
-		card = render_card(snapshot, 'PrimeBackup')
+		card = render_cards(snapshot, 'PrimeBackup')[0]
 		self.assertEqual(card.title, self.content.title)
 		self.assertEqual(card.fields[0].value, 'Steve')
 		self.assertIn('待审批', card.footer.text)
 		self.assertNotIn('截止时间', card.footer.text)
-		self.assertEqual(render_message_content(snapshot), '截止时间：<t:1100:F>（<t:1100:R>）')
+		self.assertEqual(card.fields[-1].name, '审批时间')
+		self.assertFalse(card.fields[-1].inline)
+		self.assertEqual(card.fields[-1].value, '截止时间：<t:1100:F>（<t:1100:R>）')
 		self.assertNotIn(base64.b64encode(snapshot.approval.data).decode(), card.footer.text)
 		view = card_view(1, ApprovalStatus.PENDING)
 		self.assertTrue(view.is_persistent())
@@ -498,11 +500,44 @@ class ApprovalTests(ApprovalFixture):
 		)
 		await self.create()
 		snapshot = (await self.service.pending_messages())[0]
-		card = render_card(snapshot, 'PrimeBackup')
+		cards = render_cards(snapshot, 'PrimeBackup')
+		self.assertEqual(len(cards), 2)
+		card = cards[0]
 		self.assertEqual(card.description, self.content.description)
 		self.assertEqual(len(card.fields), 25)
-		self.assertLessEqual(len(card), 6000)
-		self.assertEqual(render_message_content(snapshot), '截止时间：<t:1100:F>（<t:1100:R>）')
+		self.assertLessEqual(sum(map(len, cards)), 6000)
+		self.assertIsNone(card.footer.text)
+		self.assertIn('待审批', cards[-1].footer.text)
+		self.assertEqual(cards[-1].fields[0].value, '截止时间：<t:1100:F>（<t:1100:R>）')
+
+	async def test_time_display_at_content_limit_and_all_statuses(self) -> None:
+		self.content = ApprovalContent(
+			title='Approval', description='x' * 4096,
+			fields=(DisplayField(name='Name', value='😀' * 512), DisplayField(name='Name', value='x' * 364)),
+		)
+		await self.create()
+		original = (await self.service.pending_messages())[0]
+		for status in ApprovalStatus:
+			with self.subTest(status=status):
+				approval = original.approval.model_copy(update={
+					'status': status, 'decided_at': None if status == ApprovalStatus.PENDING else 0,
+					'reviewer_name': '😀' * 128,
+				})
+				cards = render_cards(MessageSnapshot(approval, original.link), '😀' * 128)
+				self.assertEqual(cards[0].description, self.content.description)
+				self.assertEqual(cards[0].fields[0].value, self.content.fields[0].value)
+				times = '截止时间：<t:1100:F>（<t:1100:R>）'
+				if status != ApprovalStatus.PENDING:
+					label = '取消时间' if status == ApprovalStatus.CANCELLED else '决定时间'
+					times += f'\n{label}：<t:0:F>'
+				self.assertEqual(cards[-1].fields[-1].value, times)
+				self.assertIn(status_text(status), cards[-1].footer.text)
+				text = []
+				for card in cards:
+					text.extend(part for part in (card.title, card.description, card.author.name, card.footer.text) if part is not None)
+					text.extend(part for field in card.fields for part in (field.name, field.value))
+				self.assertLessEqual(sum(len(part.encode('utf-16-le')) // 2 for part in text), 6000)
+				self.assertNotIn('\ufffd', cards[-1].footer.text)
 
 	async def test_current_reviewer_roles_and_no_admin_bypass(self) -> None:
 		bot = ApprovalBot(self.config.discord, self.service)
@@ -551,14 +586,16 @@ class ApprovalTests(ApprovalFixture):
 			snapshot = (await self.service.pending_messages())[0]
 			result = await bot.sync(snapshot, 'PrimeBackup')
 			self.assertEqual(result.message_id, '101')
-			self.assertEqual(channel.send.call_args.kwargs['content'], '截止时间：<t:1100:F>（<t:1100:R>）')
+			self.assertNotIn('content', channel.send.call_args.kwargs)
+			self.assertEqual(channel.send.call_args.kwargs['embeds'][0].fields[-1].value, '截止时间：<t:1100:F>（<t:1100:R>）')
 			await self.service.complete_message_sync(snapshot, result.message_id)
 			await self.service.decide(1, ApprovalStatus.REJECTED, '3', '1', '2', '101')
 			snapshot = (await self.service.pending_messages())[0]
 			await bot.sync(snapshot, 'PrimeBackup')
 			channel.fetch_message.return_value.edit.assert_awaited_once()
+			self.assertIsNone(channel.fetch_message.return_value.edit.call_args.kwargs['content'])
 			self.assertEqual(
-				channel.fetch_message.return_value.edit.call_args.kwargs['content'],
+				channel.fetch_message.return_value.edit.call_args.kwargs['embeds'][0].fields[-1].value,
 				'截止时间：<t:1100:F>（<t:1100:R>）\n决定时间：<t:1000:F>',
 			)
 			channel.fetch_message.side_effect = discord.NotFound(SimpleNamespace(status=404, reason='Not Found'), {'code': 10008, 'message': 'Unknown Message'})
@@ -628,7 +665,7 @@ class AdminStatusTests(ApprovalFixture):
 		result = await self.service.decide(1, ApprovalStatus.REJECTED, '审批员甲', '1', '2', '101')
 		self.assertTrue(result.accepted)
 		self.assertEqual(result.approval.reviewer_name, '审批员甲')
-		self.assertIn('审批员甲', render_card((await self.service.pending_messages())[0], 'Owner').footer.text)
+		self.assertIn('审批员甲', render_cards((await self.service.pending_messages())[0], 'Owner')[0].footer.text)
 
 	async def test_deadline_rules_and_timeout_commit(self) -> None:
 		await self.create()

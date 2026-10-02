@@ -44,9 +44,9 @@ def status_text(status: ApprovalStatus) -> str:
 			return '已取消'
 
 
-def render_message_content(snapshot: MessageSnapshot) -> str:
+def render_times(snapshot: MessageSnapshot) -> str:
 	approval = snapshot.approval
-	# Timestamp markup renders in message content, but not in embed footer text.
+	# Timestamp markup renders in embed fields, but not in embed footer text.
 	content = f'截止时间：<t:{approval.expires_at}:F>（<t:{approval.expires_at}:R>）'
 	if approval.decided_at is not None:
 		label = '取消时间' if approval.status == ApprovalStatus.CANCELLED else '决定时间'
@@ -54,7 +54,7 @@ def render_message_content(snapshot: MessageSnapshot) -> str:
 	return content
 
 
-def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
+def render_cards(snapshot: MessageSnapshot, display_name: str) -> list[discord.Embed]:
 	approval = snapshot.approval
 	color = {
 		ApprovalStatus.PENDING: 0x3498DB,
@@ -67,11 +67,25 @@ def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
 	embed.set_author(name=display_name)
 	for field in approval.content.fields:
 		embed.add_field(name=field.name, value=field.value, inline=field.inline)
+	embeds = [embed]
+	# Keep all 25 business fields available and place metadata after them.
+	if len(embed.fields) == 25:
+		embeds.append(discord.Embed(color=color))
+	metadata = embeds[-1]
+	times = render_times(snapshot)
+	metadata.add_field(name='审批时间', value=times, inline=False)
 	footer = f'单号：{approval.approval_id} | 状态：{status_text(approval.status)}'
 	if approval.reviewer_name is not None:
 		footer += f' | 审批人：{approval.reviewer_name}'
-	embed.set_footer(text=footer)
-	return embed
+	# Discord's 6000-character budget is shared by all embeds. Preserve business
+	# content and timestamps, shortening only the footer when long names fill it.
+	text = [approval.content.title, approval.content.description, display_name, '审批时间', times]
+	text.extend(part for field in approval.content.fields for part in (field.name, field.value))
+	footer_limit = 6000 - sum(len(part.encode('utf-16-le')) // 2 for part in text)
+	if len(footer.encode('utf-16-le')) // 2 > footer_limit:
+		footer = footer.encode('utf-16-le')[:(footer_limit - 1) * 2].decode('utf-16-le', errors='ignore') + '…'
+	metadata.set_footer(text=footer)
+	return embeds
 
 
 class DecisionButton(discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]], template=r'ac:(?P<approval_id>[1-9][0-9]*):(?P<decision>approved|rejected)'):
@@ -200,15 +214,15 @@ class ApprovalBot(discord.Client):
 		channel = await self.fetch_channel(int(snapshot.link.channel_id))
 		if not isinstance(channel, (discord.TextChannel, discord.Thread)) or str(channel.guild.id) != snapshot.link.guild_id:
 			raise RuntimeError('Configured approval channel is not a text channel in the expected guild')
-		embed = render_card(snapshot, display_name)
-		content = render_message_content(snapshot)
+		embeds = render_cards(snapshot, display_name)
 		view = card_view(snapshot.approval.approval_id, snapshot.approval.status)
 		if snapshot.link.message_id is None:
-			message = await channel.send(content=content, embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+			message = await channel.send(embeds=embeds, view=view, allowed_mentions=discord.AllowedMentions.none())
 			return MessageSyncResult(str(message.id))
 		try:
 			message = await channel.fetch_message(int(snapshot.link.message_id))
-			await message.edit(content=content, embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+			# Clear timestamp text above cards published with the previous layout.
+			await message.edit(content=None, embeds=embeds, view=view, allowed_mentions=discord.AllowedMentions.none())
 		except discord.NotFound as error:
 			if error.code != 10008:  # Only an unknown message ends synchronization.
 				raise
