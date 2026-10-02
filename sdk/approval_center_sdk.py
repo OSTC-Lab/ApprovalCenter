@@ -20,6 +20,7 @@ __all__ = [
 	'GetApprovalRequest', 'GetApprovalResponse',
 	'ListApprovalsRequest', 'ListApprovalsResponse',
 	'CancelApprovalRequest', 'CancelApprovalResponse',
+	'SetApprovalStatusRequest', 'SetApprovalStatusResponse',
 	'GetApprovalDataRequest', 'GetApprovalDataResponse',
 	'SetApprovalDataRequest', 'SetApprovalDataResponse',
 	'ErrorResponse', 'ApprovalCenterAPIError',
@@ -130,7 +131,7 @@ class CreateApprovalResponse(_ApiModel):
 
 
 class DecisionInfo(_ApiModel):
-	reviewer_id: Optional[str]
+	reviewer_name: Optional[str]
 	decided_at: int
 
 
@@ -161,6 +162,15 @@ class CancelApprovalRequest(_RequestModel):
 
 
 class CancelApprovalResponse(ApprovalInfo):
+	pass
+
+
+class SetApprovalStatusRequest(_RequestModel):
+	approval_id: int = Field(strict=True, ge=1, le=_MAX_SQLITE_INTEGER, exclude=True)
+	status: ApprovalStatus
+
+
+class SetApprovalStatusResponse(ApprovalInfo):
 	pass
 
 
@@ -261,6 +271,10 @@ class ApprovalCenterClient:
 		"""
 		return self._request('GET', '/api/v1/approval', ListApprovalsResponse, query=request)
 
+	def set_approval_status(self, request: SetApprovalStatusRequest) -> SetApprovalStatusResponse:
+		"""Set approval status using administrator credentials, including terminal approvals."""
+		return self._request('PUT', f'/api/v1/approval/{request.approval_id}/status', SetApprovalStatusResponse, body=request)
+
 	def get_approval_data(self, request: GetApprovalDataRequest) -> GetApprovalDataResponse:
 		return self._request('GET', f'/api/v1/approval-data/{request.approval_id}', GetApprovalDataResponse)
 
@@ -306,6 +320,10 @@ class AsyncApprovalCenterClient:
 	async def cancel_approval(self, request: CancelApprovalRequest) -> CancelApprovalResponse:
 		"""Cancel a pending approval. Repeated cancellation preserves the terminal time."""
 		return await self._request('POST', f'/api/v1/approval/{request.approval_id}/cancel', CancelApprovalResponse)
+
+	async def set_approval_status(self, request: SetApprovalStatusRequest) -> SetApprovalStatusResponse:
+		"""Set approval status using administrator credentials, including terminal approvals."""
+		return await self._request('PUT', f'/api/v1/approval/{request.approval_id}/status', SetApprovalStatusResponse, body=request)
 
 	async def list_approvals(self, request: ListApprovalsRequest) -> ListApprovalsResponse:
 		"""Fetch one page. Time ranges include their start and exclude their end.

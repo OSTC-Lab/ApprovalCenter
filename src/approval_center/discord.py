@@ -68,8 +68,8 @@ def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
 	for field in approval.content.fields:
 		embed.add_field(name=field.name, value=field.value, inline=field.inline)
 	footer = f'单号：{approval.approval_id} | 状态：{status_text(approval.status)}'
-	if approval.reviewer_id is not None:
-		footer += f' | 审批人：{approval.reviewer_id}'
+	if approval.reviewer_name is not None:
+		footer += f' | 审批人：{approval.reviewer_name}'
 	embed.set_footer(text=footer)
 	return embed
 
@@ -184,7 +184,7 @@ class ApprovalBot(discord.Client):
 				await interaction.followup.send(f'你没有审批单 {approval_id} 的审批权限。', ephemeral=True)
 				return
 			result = await self.service.decide(
-				approval_id, decision, str(interaction.user.id), str(interaction.guild.id),
+				approval_id, decision, interaction.user.display_name, str(interaction.guild.id),
 				str(interaction.channel_id), str(interaction.message.id),
 			)
 			text = f'审批单 {result.approval.approval_id} {status_text(result.approval.status)}。'
@@ -193,7 +193,7 @@ class ApprovalBot(discord.Client):
 			text = f'审批单 {approval_id} 不存在或已清理。' if error.status_code == 404 else f'审批单 {approval_id} 的卡片关联无效。'
 			await interaction.followup.send(text, ephemeral=True)
 		except Exception:
-			LOGGER.exception('Discord decision failed approval_id=%s reviewer_id=%s', approval_id, interaction.user.id)
+			LOGGER.exception('Discord decision failed approval_id=%s discord_user_id=%s', approval_id, interaction.user.id)
 			await interaction.followup.send(f'审批单 {approval_id} 处理失败，请稍后重试。', ephemeral=True)
 
 	async def sync(self, snapshot: MessageSnapshot, display_name: str) -> MessageSyncResult:

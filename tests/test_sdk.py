@@ -139,7 +139,7 @@ class SdkTests(unittest.TestCase):
 
 	def test_sync_cancel_protocol(self) -> None:
 		cancelled = self.approval.model_copy(update={
-			'status': ApprovalStatus.CANCELLED, 'decision': api.DecisionInfo(reviewer_id=None, decided_at=1001), 'updated_at': 1001,
+			'status': ApprovalStatus.CANCELLED, 'decision': api.DecisionInfo(reviewer_name=None, decided_at=1001), 'updated_at': 1001,
 		})
 		self.responses = [httpx.Response(200, content=cancelled.model_dump_json())]
 		with self.make_client() as client:
@@ -147,11 +147,29 @@ class SdkTests(unittest.TestCase):
 		self.assertIsInstance(response, sdk.CancelApprovalResponse)
 		self.assertIs(response.status, sdk.ApprovalStatus.CANCELLED)
 		self.assertEqual(response.decision.decided_at, 1001)
-		self.assertIsNone(response.decision.reviewer_id)
+		self.assertIsNone(response.decision.reviewer_name)
 		self.assertEqual(response.data, b'\x00\xff')
 		self.assertEqual(self.requests[0].method, 'POST')
 		self.assertEqual(self.requests[0].url.path, '/prefix/api/v1/approval/1/cancel')
 		self.assertEqual(self.requests[0].content, b'')
+
+	def test_sync_set_status_protocol(self) -> None:
+		approved = self.approval.model_copy(update={
+			'status': ApprovalStatus.APPROVED, 'decision': api.DecisionInfo(reviewer_name='管理员甲', decided_at=1001), 'updated_at': 1001,
+		})
+		self.responses = [httpx.Response(200, content=approved.model_dump_json())]
+		with self.make_client() as client:
+			response = client.set_approval_status(sdk.SetApprovalStatusRequest(approval_id=1, status=sdk.ApprovalStatus.APPROVED))
+		self.assertIsInstance(response, sdk.SetApprovalStatusResponse)
+		self.assertIs(response.status, sdk.ApprovalStatus.APPROVED)
+		self.assertEqual(response.decision.reviewer_name, '管理员甲')
+		self.assertEqual(self.requests[0].method, 'PUT')
+		self.assertEqual(self.requests[0].url.path, '/prefix/api/v1/approval/1/status')
+		self.assertEqual(self.requests[0].content, b'{"status":"approved"}')
+		with self.assertRaises(ValidationError):
+			sdk.SetApprovalStatusRequest(approval_id=0, status=sdk.ApprovalStatus.APPROVED)
+		with self.assertRaises(ValidationError):
+			sdk.SetApprovalStatusRequest(approval_id=1, status='unknown')
 
 	def test_transport_error_is_not_wrapped_or_retried(self) -> None:
 		error = httpx.ReadTimeout('Simulated timeout')
@@ -271,7 +289,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			timed_out = await client.get_approval(request)
 			self.assertIs(timed_out.status, sdk.ApprovalStatus.TIMED_OUT)
 			self.assertIsNotNone(timed_out.decision)
-			self.assertIsNone(timed_out.decision.reviewer_id)
+			self.assertIsNone(timed_out.decision.reviewer_name)
 			self.assertEqual(timed_out.decision.decided_at, 1100)
 			self.assertEqual((await client.set_approval_data(sdk.SetApprovalDataRequest(approval_id=created.approval_id, data=b'terminal'))).version, 3)
 		with self.assertRaises(RuntimeError):
@@ -331,7 +349,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			cancelled = await client.cancel_approval(request)
 			self.assertIs(cancelled.status, sdk.ApprovalStatus.CANCELLED)
 			self.assertEqual(cancelled.decision.decided_at, 1001)
-			self.assertIsNone(cancelled.decision.reviewer_id)
+			self.assertIsNone(cancelled.decision.reviewer_name)
 			self.assertEqual(cancelled.data, b'\xff')
 			self.assertEqual(cancelled.reference_key, 'survival/Steve')
 			self.now = 1002
@@ -345,6 +363,32 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 				await client.cancel_approval(sdk.CancelApprovalRequest(approval_id=pending.approval_id))
 			self.assertEqual(caught.exception.status_code, 409)
 			self.assertEqual(caught.exception.code, 'approval_not_pending')
+
+	async def test_actual_api_admin_status(self) -> None:
+		async with self.make_client() as owner:
+			created = await owner.create_approval(sdk.CreateApprovalRequest(content=sdk.ApprovalContent(title='Approval'), expires_at=1100))
+			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
+				await owner.set_approval_status(sdk.SetApprovalStatusRequest(approval_id=created.approval_id, status=sdk.ApprovalStatus.APPROVED))
+			self.assertEqual(caught.exception.code, 'forbidden')
+		async with self.make_client('admin') as admin:
+			self.now = 1001
+			approved = await admin.set_approval_status(sdk.SetApprovalStatusRequest(approval_id=created.approval_id, status=sdk.ApprovalStatus.APPROVED))
+			self.assertIsInstance(approved, sdk.SetApprovalStatusResponse)
+			self.assertEqual(approved.decision.reviewer_name, 'Admin')
+			self.assertEqual(approved.decision.decided_at, 1001)
+			cancelled = await admin.set_approval_status(sdk.SetApprovalStatusRequest(approval_id=created.approval_id, status=sdk.ApprovalStatus.CANCELLED))
+			self.assertEqual(cancelled.decision.reviewer_name, 'Admin')
+			pending = await admin.set_approval_status(sdk.SetApprovalStatusRequest(approval_id=created.approval_id, status=sdk.ApprovalStatus.PENDING))
+			self.assertIsNone(pending.decision)
+			self.now = 1100
+			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
+				await admin.set_approval_status(sdk.SetApprovalStatusRequest(approval_id=created.approval_id, status=sdk.ApprovalStatus.PENDING))
+			self.assertEqual(caught.exception.status_code, 409)
+			self.assertEqual(caught.exception.code, 'invalid_status_transition')
+			self.assertIs((await admin.get_approval(sdk.GetApprovalRequest(approval_id=created.approval_id))).status, sdk.ApprovalStatus.TIMED_OUT)
+			approved = await admin.set_approval_status(sdk.SetApprovalStatusRequest(approval_id=created.approval_id, status=sdk.ApprovalStatus.APPROVED))
+			self.assertEqual(approved.client_id, 'owner')
+			self.assertEqual(approved.decision.reviewer_name, 'Admin')
 
 	async def test_async_transport_and_response_errors(self) -> None:
 		error = httpx.ConnectError('Simulated connection failure')

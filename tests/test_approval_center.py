@@ -238,7 +238,7 @@ class ApprovalTests(ApprovalFixture):
 		self.clock.seconds = 1110
 		updated = await self.service.replace_data(self.owner, 1, b'done', None)
 		self.assertEqual(updated.status, ApprovalStatus.APPROVED)
-		self.assertEqual(updated.reviewer_id, '3')
+		self.assertEqual(updated.reviewer_name, '3')
 		self.assertEqual(updated.decided_at, 1000)
 		self.assertEqual(updated.expires_at, 1100)
 
@@ -248,7 +248,7 @@ class ApprovalTests(ApprovalFixture):
 		self.clock.seconds = 1001
 		cancelled = await self.service.cancel(self.owner, approval.approval_id)
 		self.assertEqual(cancelled.status, ApprovalStatus.CANCELLED)
-		self.assertIsNone(cancelled.reviewer_id)
+		self.assertIsNone(cancelled.reviewer_name)
 		self.assertEqual(cancelled.decided_at, 1001)
 		self.assertEqual(cancelled.updated_at, 1001)
 		self.assertEqual(cancelled.expires_at, approval.expires_at)
@@ -381,7 +381,7 @@ class ApprovalTests(ApprovalFixture):
 		self.assertFalse(result.accepted)
 		self.assertEqual(result.approval.status, ApprovalStatus.TIMED_OUT)
 		self.assertEqual(result.approval.decided_at, 1100)
-		self.assertIsNone(result.approval.reviewer_id)
+		self.assertIsNone(result.approval.reviewer_name)
 		await self.create(expires_at=1101)
 		self.clock.seconds = 1101
 		self.assertEqual(await self.service.list_approvals(self.owner, ApprovalFilter(status=ApprovalStatus.PENDING)), [])
@@ -581,6 +581,155 @@ class ApprovalTests(ApprovalFixture):
 		self.assertIn('owner_client_id=owner', text)
 
 
+class AdminStatusTests(ApprovalFixture):
+	async def test_terminal_adjustment_snapshot_and_idempotence(self) -> None:
+		original = await self.create(reference_key='server/Steve')
+		await self.maintenance.run_once()
+		self.clock.seconds = 1001
+		admin = self.admin.model_copy(update={'display_name': '管理员甲'})
+		for status in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED, ApprovalStatus.CANCELLED):
+			with self.subTest(status=status):
+				with self.assertLogs('approval_center.approval', level=logging.INFO) as logs:
+					approval = await self.service.set_status(admin, original.approval_id, status)
+				self.assertEqual(approval.status, status)
+				self.assertEqual(approval.reviewer_name, '管理员甲')
+				self.assertEqual(approval.decided_at, self.clock.seconds)
+				self.assertEqual(approval.updated_at, self.clock.seconds)
+				self.assertEqual(approval.client_id, original.client_id)
+				self.assertEqual(approval.created_at, original.created_at)
+				self.assertEqual(approval.expires_at, original.expires_at)
+				self.assertEqual(approval.content, original.content)
+				self.assertEqual(approval.reference_key, original.reference_key)
+				self.assertEqual(approval.data, original.data)
+				self.assertEqual(approval.data_version, original.data_version)
+				self.assertIn('actor_client_id=admin', logs.output[0])
+				self.assertIn('owner_client_id=owner', logs.output[0])
+				self.assertIn('previous_status=', logs.output[0])
+				await self.maintenance.run_once()
+				self.clock.seconds += 1
+				renamed = admin.model_copy(update={'display_name': '管理员乙'})
+				self.assertEqual(await self.service.set_status(renamed, original.approval_id, status), approval)
+				self.assertEqual(await self.service.pending_messages(), [])
+		await self.storage.close()
+		self.storage = await Storage.open(self.path)
+		self.service.storage = self.storage
+		self.assertEqual((await self.service.get(self.owner, original.approval_id)).reviewer_name, '管理员甲')
+
+	async def test_restore_pending_and_resume_discord_decision(self) -> None:
+		await self.create()
+		await self.maintenance.run_once()
+		await self.service.set_status(self.admin, 1, ApprovalStatus.APPROVED)
+		self.clock.seconds = 1001
+		pending = await self.service.set_status(self.admin, 1, ApprovalStatus.PENDING)
+		self.assertIsNone(pending.reviewer_name)
+		self.assertIsNone(pending.decided_at)
+		self.assertTrue(all(not child.item.disabled for child in card_view(1, pending.status).children))
+		await self.maintenance.run_once()
+		result = await self.service.decide(1, ApprovalStatus.REJECTED, '审批员甲', '1', '2', '101')
+		self.assertTrue(result.accepted)
+		self.assertEqual(result.approval.reviewer_name, '审批员甲')
+		self.assertIn('审批员甲', render_card((await self.service.pending_messages())[0], 'Owner').footer.text)
+
+	async def test_deadline_rules_and_timeout_commit(self) -> None:
+		await self.create()
+		await self.maintenance.run_once()
+		with self.assertRaises(ApprovalError) as caught:
+			await self.service.set_status(self.admin, 1, ApprovalStatus.TIMED_OUT)
+		self.assertEqual(caught.exception.code, 'invalid_status_transition')
+		self.assertEqual((await self.service.get(self.owner, 1)).status, ApprovalStatus.PENDING)
+		self.assertEqual(await self.service.pending_messages(), [])
+		self.clock.seconds = 1100
+		with self.assertRaises(ApprovalError) as caught:
+			await self.service.set_status(self.admin, 1, ApprovalStatus.PENDING)
+		self.assertEqual(caught.exception.status_code, 409)
+		async with self.storage.transaction() as transaction:
+			stored = await transaction.get(1)
+			self.assertEqual(stored.status, ApprovalStatus.TIMED_OUT)
+			self.assertIsNone(stored.reviewer_name)
+			self.assertEqual(stored.decided_at, 1100)
+			self.assertTrue((await transaction.get_link(1)).needs_message_sync)
+		approved = await self.service.set_status(self.admin, 1, ApprovalStatus.APPROVED)
+		self.assertEqual(approved.reviewer_name, 'admin')
+		await self.assert_error(409, self.service.set_status(self.admin, 1, ApprovalStatus.PENDING))
+		self.assertEqual(await self.service.get(self.owner, 1), approved)
+		self.clock.seconds = 1101
+		timed_out = await self.service.set_status(self.admin, 1, ApprovalStatus.TIMED_OUT)
+		self.assertEqual(timed_out.decided_at, 1100)
+		self.assertEqual(timed_out.updated_at, 1101)
+		self.assertIsNone(timed_out.reviewer_name)
+
+	async def test_permissions_and_retention(self) -> None:
+		await self.create()
+		for client in (self.owner, self.other):
+			await self.assert_error(403, self.service.set_status(client, 1, ApprovalStatus.APPROVED))
+		await self.assert_error(404, self.service.set_status(self.admin, 999, ApprovalStatus.APPROVED))
+		self.clock.seconds = 1119
+		await self.service.set_status(self.admin, 1, ApprovalStatus.APPROVED)
+		self.clock.seconds = 1120
+		await self.assert_error(404, self.service.set_status(self.admin, 1, ApprovalStatus.REJECTED))
+		self.assertEqual(await self.service.cleanup(), 1)
+
+	async def test_deadline_rechecked_after_lookup(self) -> None:
+		await self.create()
+		self.clock.seconds = 1099
+		from approval_center.storage import Transaction
+		get = Transaction.get
+
+		async def delayed_get(transaction: Transaction, approval_id: int):
+			approval = await get(transaction, approval_id)
+			self.clock.seconds = 1100
+			return approval
+
+		with patch.object(Transaction, 'get', delayed_get):
+			await self.assert_error(409, self.service.set_status(self.admin, 1, ApprovalStatus.PENDING))
+		async with self.storage.transaction() as transaction:
+			self.assertEqual((await transaction.get(1)).status, ApprovalStatus.TIMED_OUT)
+
+	async def test_same_status_new_decision_during_sync(self) -> None:
+		await self.create()
+		await self.maintenance.run_once()
+		await self.service.decide(1, ApprovalStatus.APPROVED, '审批员甲', '1', '2', '101')
+		snapshot = (await self.service.pending_messages())[0]
+		# Return to the same status within the same second, but with a different name.
+		await self.service.set_status(self.admin, 1, ApprovalStatus.PENDING)
+		await self.service.set_status(self.admin, 1, ApprovalStatus.APPROVED)
+		await self.service.complete_message_sync(snapshot, '101')
+		current = (await self.service.pending_messages())[0]
+		self.assertEqual(current.approval.status, snapshot.approval.status)
+		self.assertEqual(current.approval.decided_at, snapshot.approval.decided_at)
+		self.assertEqual(current.approval.reviewer_name, 'admin')
+		await self.maintenance.run_once()
+		snapshot = self.publisher.snapshots[-1]
+		# Identical status and name must still synchronize a newer decision time.
+		self.clock.seconds = 1002
+		await self.service.set_status(self.admin, 1, ApprovalStatus.PENDING)
+		await self.service.set_status(self.admin, 1, ApprovalStatus.APPROVED)
+		await self.service.complete_message_sync(snapshot, '101')
+		self.assertEqual((await self.service.pending_messages())[0].approval.decided_at, 1002)
+		await self.maintenance.run_once()
+		self.assertEqual(await self.service.pending_messages(), [])
+
+	async def test_discord_display_name_snapshot(self) -> None:
+		await self.create()
+		await self.maintenance.run_once()
+		bot = ApprovalBot(self.config.discord, self.service)
+		interaction = SimpleNamespace(
+			guild=SimpleNamespace(id=1), channel_id=2, message=SimpleNamespace(id=101),
+			user=SimpleNamespace(id=3, display_name='审批员甲'), followup=AsyncMock(),
+		)
+		try:
+			with patch.object(bot, 'reviewer_allowed', return_value=True) as allowed:
+				await bot.handle_decision(interaction, 1, ApprovalStatus.APPROVED)
+				allowed.assert_awaited_once_with(interaction.guild, 3)
+				interaction.user.display_name = '审批员乙'
+				await bot.handle_decision(interaction, 1, ApprovalStatus.REJECTED)
+			approval = await self.service.get(self.owner, 1)
+			self.assertEqual(approval.reviewer_name, '审批员甲')
+			interaction.followup.send.assert_awaited_with('审批单 1 已同意。', ephemeral=True)
+		finally:
+			await bot.close()
+
+
 class ApiTests(ApprovalFixture):
 	@override
 	async def asyncSetUp(self) -> None:
@@ -669,7 +818,7 @@ class ApiTests(ApprovalFixture):
 		self.assertEqual(response.status_code, 200, response.text)
 		body = response.json()
 		self.assertEqual(body['status'], 'cancelled')
-		self.assertEqual(body['decision'], {'reviewer_id': None, 'decided_at': 1001})
+		self.assertEqual(body['decision'], {'reviewer_name': None, 'decided_at': 1001})
 		self.assertEqual(body['client_id'], 'owner')
 		self.assertEqual(body['reference_key'], 'survival/Steve')
 		self.assertEqual(body['data'], 'AP8=')
@@ -684,6 +833,28 @@ class ApiTests(ApprovalFixture):
 		self.assertEqual(response.json()['code'], 'approval_not_pending')
 		async with self.storage.transaction() as transaction:
 			self.assertEqual((await transaction.get(2)).status, ApprovalStatus.TIMED_OUT)
+
+	async def test_api_admin_status_and_latest_decision_model(self) -> None:
+		await self.create()
+		path = '/api/v1/approval/1/status'
+		for auth, expected in ((None, 401), (('owner', 'secret'), 403), (('other', 'secret'), 403), (('disabled', 'secret'), 401)):
+			self.assertEqual((await self.http.put(path, auth=auth, json={'status': 'approved'})).status_code, expected)
+		response = await self.http.put(path, auth=('admin', 'secret'), json={'status': 'approved'})
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual(response.json()['decision'], {'reviewer_name': 'admin', 'decided_at': 1000})
+		self.assertEqual(response.json()['client_id'], 'owner')
+		self.assertEqual(response.json()['data'], 'AP8=')
+		response = await self.http.put(path, auth=('admin', 'secret'), json={'status': 'pending'})
+		self.assertIsNone(response.json()['decision'])
+		for body in ({}, {'status': 'unknown'}, {'status': 'approved', 'reviewer_name': 'fake'}):
+			self.assertEqual((await self.http.put(path, auth=('admin', 'secret'), json=body)).status_code, 422)
+		for approval_id, expected in ((0, 422), (999, 404)):
+			self.assertEqual((await self.http.put(f'/api/v1/approval/{approval_id}/status', auth=('admin', 'secret'), json={'status': 'approved'})).status_code, expected)
+		self.clock.seconds = 1100
+		response = await self.http.put(path, auth=('admin', 'secret'), json={'status': 'pending'})
+		self.assertEqual(response.status_code, 409)
+		self.assertEqual(response.json()['code'], 'invalid_status_transition')
+		self.assertEqual((await self.http.get('/api/v1/approval/1')).json()['status'], 'timed_out')
 
 	async def test_api_invalid_inputs_and_health(self) -> None:
 		for data in ('!!!', '汉字', 123, None):

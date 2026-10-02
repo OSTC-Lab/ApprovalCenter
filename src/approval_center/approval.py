@@ -66,7 +66,7 @@ class Approval(StoredModel):
 	created_at: int
 	expires_at: int
 	updated_at: int
-	reviewer_id: Snowflake | None
+	reviewer_name: str | None
 	decided_at: int | None
 	data: bytes
 	data_version: int
@@ -148,7 +148,7 @@ class ApprovalService:
 		if approval.status == ApprovalStatus.PENDING and now >= approval.expires_at:
 			await transaction.set_decision(approval.approval_id, ApprovalStatus.TIMED_OUT, None, approval.expires_at, now)
 			LOGGER.info('Approval timed out approval_id=%s client_id=%s', approval.approval_id, approval.client_id)
-			return approval.model_copy(update={'status': ApprovalStatus.TIMED_OUT, 'reviewer_id': None, 'decided_at': approval.expires_at, 'updated_at': now})
+			return approval.model_copy(update={'status': ApprovalStatus.TIMED_OUT, 'reviewer_name': None, 'decided_at': approval.expires_at, 'updated_at': now})
 		return approval
 
 	async def _get(self, transaction: 'Transaction', approval_id: int, client: ClientConfig | None, now: int) -> Approval:
@@ -181,6 +181,40 @@ class ApprovalService:
 			LOGGER.info('Approval cancelled approval_id=%s actor_client_id=%s owner_client_id=%s', approval_id, client.client_id, approval.client_id)
 		return approval
 
+	async def set_status(self, client: ClientConfig, approval_id: int, status: ApprovalStatus) -> Approval:
+		if not client.is_admin:
+			raise ApprovalError('forbidden', 'Only administrator clients may set approval status', 403)
+		conflict: str | None = None
+		async with self.storage.transaction() as transaction:
+			approval = await self._get(transaction, approval_id, client, self.now())
+			now = self.now()
+			approval = await self._expire(transaction, approval, now)
+			previous_status = approval.status
+			if status == ApprovalStatus.PENDING and now >= approval.expires_at:
+				conflict = 'Expired approvals cannot be restored to pending'
+			elif status == ApprovalStatus.TIMED_OUT and now < approval.expires_at:
+				conflict = 'Approval deadline has not been reached'
+			elif status != previous_status:
+				if status == ApprovalStatus.PENDING:
+					reviewer_name, decided_at = None, None
+				elif status == ApprovalStatus.TIMED_OUT:
+					reviewer_name, decided_at = None, approval.expires_at
+				else:
+					reviewer_name, decided_at = client.display_name, now
+				await transaction.set_decision(approval_id, status, reviewer_name, decided_at, now)
+				updated = await transaction.get(approval_id)
+				assert updated is not None
+				approval = updated
+		# Keep any automatic timeout even when the requested transition is invalid.
+		if conflict is not None:
+			raise ApprovalError('invalid_status_transition', conflict, 409)
+		if status != previous_status:
+			LOGGER.info(
+				'Approval status changed approval_id=%s actor_client_id=%s owner_client_id=%s previous_status=%s status=%s',
+				approval_id, client.client_id, approval.client_id, previous_status.value, status.value,
+			)
+		return approval
+
 	async def list_approvals(self, client: ClientConfig, filters: ApprovalFilter) -> list[Approval]:
 		if filters.all_clients and not client.is_admin:
 			raise ApprovalError('forbidden', 'Only administrator clients may list all approvals', 403)
@@ -205,7 +239,7 @@ class ApprovalService:
 		LOGGER.info('Custom data replaced approval_id=%s actor_client_id=%s owner_client_id=%s version=%s', approval_id, client.client_id, approval.client_id, approval.data_version)
 		return approval
 
-	async def decide(self, approval_id: int, status: ApprovalStatus, reviewer_id: str, guild_id: str, channel_id: str, message_id: str) -> DecisionResult:
+	async def decide(self, approval_id: int, status: ApprovalStatus, reviewer_name: str, guild_id: str, channel_id: str, message_id: str) -> DecisionResult:
 		if status not in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):
 			raise ValueError('Decision must be approved or rejected')
 		async with self.storage.transaction() as transaction:
@@ -218,9 +252,9 @@ class ApprovalService:
 			approval = await self._expire(transaction, approval, now)
 			if approval.status != ApprovalStatus.PENDING:
 				return DecisionResult(approval, False)
-			await transaction.set_decision(approval_id, status, reviewer_id, now, now)
-			approval = approval.model_copy(update={'status': status, 'reviewer_id': reviewer_id, 'decided_at': now, 'updated_at': now})
-		LOGGER.info('Approval decided approval_id=%s client_id=%s reviewer_id=%s status=%s', approval_id, approval.client_id, reviewer_id, status.value)
+			await transaction.set_decision(approval_id, status, reviewer_name, now, now)
+			approval = approval.model_copy(update={'status': status, 'reviewer_name': reviewer_name, 'decided_at': now, 'updated_at': now})
+		LOGGER.info('Approval decided approval_id=%s client_id=%s reviewer_name=%s status=%s', approval_id, approval.client_id, reviewer_name, status.value)
 		return DecisionResult(approval, True)
 
 	async def expire_due(self) -> int:
@@ -238,7 +272,11 @@ class ApprovalService:
 		async with self.storage.transaction() as transaction:
 			approval = await transaction.get(snapshot.approval.approval_id)
 			if approval is not None:
-				needs_sync = not missing and approval.status != snapshot.approval.status
+				needs_sync = not missing and (
+					approval.status != snapshot.approval.status
+					or approval.reviewer_name != snapshot.approval.reviewer_name
+					or approval.decided_at != snapshot.approval.decided_at
+				)
 				await transaction.save_message(approval.approval_id, message_id, needs_sync)
 
 	async def cleanup(self) -> int:

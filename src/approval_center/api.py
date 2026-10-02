@@ -62,7 +62,7 @@ class CreateApprovalResponse(ApiModel):
 
 
 class DecisionInfo(ApiModel):
-	reviewer_id: str | None
+	reviewer_name: str | None
 	decided_at: int
 
 
@@ -81,7 +81,7 @@ class ApprovalInfo(ApiModel):
 
 	@classmethod
 	def of(cls, approval: Approval) -> Self:
-		decision = None if approval.decided_at is None else DecisionInfo(reviewer_id=approval.reviewer_id, decided_at=approval.decided_at)
+		decision = None if approval.decided_at is None else DecisionInfo(reviewer_name=approval.reviewer_name, decided_at=approval.decided_at)
 		return cls(
 			approval_id=approval.approval_id, status=approval.status, client_id=approval.client_id, reference_key=approval.reference_key,
 			content=approval.content, created_at=approval.created_at, expires_at=approval.expires_at,
@@ -102,6 +102,14 @@ class CancelApprovalRequest(ApiModel):
 
 
 class CancelApprovalResponse(ApprovalInfo):
+	pass
+
+
+class SetApprovalStatusRequest(ApiModel):
+	status: ApprovalStatus
+
+
+class SetApprovalStatusResponse(ApprovalInfo):
 	pass
 
 
@@ -232,6 +240,10 @@ def install_api(app: FastAPI, config: Config, service_provider: Callable[[], App
 	@app.post('/api/v1/approval/{approval_id}/cancel', response_model=CancelApprovalResponse)
 	async def cancel_approval(request: Annotated[CancelApprovalRequest, Depends()], client: Client) -> CancelApprovalResponse:
 		return CancelApprovalResponse.of(await service_provider().cancel(client, request.approval_id))
+
+	@app.put('/api/v1/approval/{approval_id}/status', response_model=SetApprovalStatusResponse)
+	async def set_approval_status(approval_id: ApprovalId, body: SetApprovalStatusRequest, client: Client) -> SetApprovalStatusResponse:
+		return SetApprovalStatusResponse.of(await service_provider().set_status(client, approval_id, body.status))
 
 	@app.get('/api/v1/approval-data/{approval_id}', response_model=GetApprovalDataResponse)
 	async def get_approval_data(request: Annotated[GetApprovalDataRequest, Depends()], client: Client) -> GetApprovalDataResponse:

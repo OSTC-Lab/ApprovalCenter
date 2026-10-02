@@ -18,13 +18,13 @@ CREATE TABLE IF NOT EXISTS approval (
 	created_at INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
-	reviewer_id TEXT,
+	reviewer_name TEXT,
 	decided_at INTEGER,
 	CHECK (
-		(status = 'pending' AND reviewer_id IS NULL AND decided_at IS NULL)
-		OR (status IN ('approved', 'rejected') AND reviewer_id IS NOT NULL AND decided_at IS NOT NULL)
-		OR (status = 'timed_out' AND reviewer_id IS NULL AND decided_at IS NOT NULL AND decided_at = expires_at)
-		OR (status = 'cancelled' AND reviewer_id IS NULL AND decided_at IS NOT NULL)
+		(status = 'pending' AND reviewer_name IS NULL AND decided_at IS NULL)
+		OR (status IN ('approved', 'rejected') AND reviewer_name IS NOT NULL AND decided_at IS NOT NULL)
+		OR (status = 'timed_out' AND reviewer_name IS NULL AND decided_at IS NOT NULL AND decided_at = expires_at)
+		OR (status = 'cancelled' AND decided_at IS NOT NULL)
 	)
 );
 CREATE TABLE IF NOT EXISTS approval_data (
@@ -58,7 +58,7 @@ def approval_from_row(row: aiosqlite.Row) -> Approval:
 		approval_id=row['approval_id'], client_id=row['client_id'], reference_key=row['reference_key'],
 		content=ApprovalContent.model_validate_json(row['content']), status=row['status'],
 		created_at=row['created_at'], expires_at=row['expires_at'], updated_at=row['updated_at'],
-		reviewer_id=row['reviewer_id'], decided_at=row['decided_at'],
+		reviewer_name=row['reviewer_name'], decided_at=row['decided_at'],
 		data=row['data'], data_version=row['data_version'],
 	)
 
@@ -96,14 +96,14 @@ class Transaction:
 		await self.connection.execute('INSERT INTO approval_discord (approval_id, guild_id, channel_id) VALUES (?, ?, ?)', (approval_id, guild_id, channel_id))
 		return Approval(
 			approval_id=approval_id, client_id=client_id, reference_key=reference_key, content=content, status=ApprovalStatus.PENDING,
-			created_at=now, expires_at=expires_at, updated_at=now, reviewer_id=None, decided_at=None,
+			created_at=now, expires_at=expires_at, updated_at=now, reviewer_name=None, decided_at=None,
 			data=data, data_version=0,
 		)
 
-	async def set_decision(self, approval_id: int, status: ApprovalStatus, reviewer_id: str | None, decided_at: int, now: int) -> None:
+	async def set_decision(self, approval_id: int, status: ApprovalStatus, reviewer_name: str | None, decided_at: int | None, now: int) -> None:
 		await self.connection.execute(
-			'UPDATE approval SET status = ?, reviewer_id = ?, decided_at = ?, updated_at = ? WHERE approval_id = ?',
-			(status.value, reviewer_id, decided_at, now, approval_id),
+			'UPDATE approval SET status = ?, reviewer_name = ?, decided_at = ?, updated_at = ? WHERE approval_id = ?',
+			(status.value, reviewer_name, decided_at, now, approval_id),
 		)
 		await self.connection.execute('UPDATE approval_discord SET needs_message_sync = 1 WHERE approval_id = ?', (approval_id,))
 

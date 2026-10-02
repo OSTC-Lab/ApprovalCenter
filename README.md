@@ -68,7 +68,8 @@ flowchart LR
 | `timed_out` | 截止前未形成有效决定，已超时     |
 | `cancelled` | 已由所属接入方或管理员接入方取消 |
 
-除 `pending` 外，其余状态均为终态，不再变更。
+除 `pending` 外，其余状态均为终态，常规审批和取消操作不能再变更。
+管理员接入方可通过状态调整接口修改终态。
 `expires_at` 限定审批和取消的时间窗口，已同意的单据过了截止时间仍保持 `approved`。
 接入方负责定义授权有效期、执行次数和具体操作。
 
@@ -227,6 +228,7 @@ GET 接口和取消接口没有 JSON body，健康接口无需鉴权。
 | 列表，`all=false`                | 自己的单据 | 自己的单据       |
 | 列表，`all=true`                 | 返回 403   | 全部接入方的单据 |
 | 查询审批单、读取或覆盖数据、取消 | 自己的单据 | 任意接入方的单据 |
+| 调整审批状态                     | 返回 403   | 任意接入方的单据 |
 
 无法访问的单号与不存在的单号均返回 404。创建时不能指定其他接入方为所有者。
 
@@ -236,6 +238,7 @@ GET 接口和取消接口没有 JSON body，健康接口无需鉴权。
 | GET  | `/api/v1/approval`                      | 200        |
 | GET  | `/api/v1/approval/{approval_id}`        | 200        |
 | POST | `/api/v1/approval/{approval_id}/cancel` | 200        |
+| PUT  | `/api/v1/approval/{approval_id}/status` | 200        |
 | GET  | `/api/v1/approval-data/{approval_id}`   | 200        |
 | PUT  | `/api/v1/approval-data/{approval_id}`   | 200        |
 | GET  | `/heathz`                               | 200        |
@@ -317,12 +320,13 @@ GET 接口和取消接口没有 JSON body，健康接口无需鉴权。
 | `created_at`    | 整数          | 创建时间                                                  |
 | `expires_at`    | 整数          | 截止时间                                                  |
 | `updated_at`    | 整数          | 最近一次状态或自定义数据变化时间                          |
-| `decision`      | 对象或 null   | 待审批时为 null，终态时包含 `reviewer_id` 和 `decided_at` |
+| `decision`      | 对象或 null   | 待审批时为 null，终态时包含 `reviewer_name` 和 `decided_at` |
 | `data`          | 字符串        | 当前 Base64 自定义数据                                    |
 | `data_version`  | 整数          | 当前数据版本                                              |
 
-同意或拒绝时，`decision.reviewer_id` 为审批人员的 Discord ID，`decided_at` 为决定时间。
-超时时，审批人员为 null，时间等于 `expires_at`；取消时，审批人员为 null，时间为取消时间。
+`decision.reviewer_name` 保存操作发生时的展示名称：Discord 审批使用操作人的展示名称，
+管理员状态调整使用接入方配置的 `display_name`。后续改名不影响已有决定信息。
+超时时名称为 null，时间等于 `expires_at`；通过取消接口取消时名称为 null，时间为取消时间。
 
 接入方轮询该接口获取状态变化。多次更新可能发生在同一秒，版本校验应使用数据版本。
 
@@ -363,6 +367,33 @@ GET 接口和取消接口没有 JSON body，健康接口无需鉴权。
 已同意、已拒绝和已超时的单据返回 409，错误码为 `approval_not_pending`。
 达到截止时间的待审批单先转为 `timed_out`，再返回 409。
 单据不存在、无访问权限或超过保留期限时返回 404。
+
+### 调整审批状态
+
+`PUT /api/v1/approval/{approval_id}/status`
+
+仅管理员接入方可调用，成功返回完整审批单。
+
+请求 JSON：
+
+```json
+{
+  "status": "approved"
+}
+```
+
+| 目标状态 | 规则 |
+|----------|------|
+| `pending` | 尚未到截止时间，清除决定信息，重新开放审批 |
+| `approved`、`rejected`、`cancelled` | 保留期内允许设置，保存管理员展示名称及操作时间 |
+| `timed_out` | 已到截止时间，名称为 null，决定时间为截止时间 |
+
+设置为当前状态时不修改决定信息或更新时间。
+修改终态不受常规审批窗口限制，但不能恢复已到截止时间的单据为 `pending`。
+截止时间与目标状态不符时返回 `409 invalid_status_transition`。
+达到截止时间的待审批单会先落实超时，即使后续状态调整被拒绝，该超时仍会保存。
+
+状态调整不改变截止时间、保留期限或自定义数据，也不撤销接入方已经执行的业务操作。
 
 ### 读取自定义数据
 
@@ -444,10 +475,11 @@ Discord 降级期间，HTTP 业务接口仍可能可用。
 | HTTP 状态码 | 错误码                  | 含义                                          |
 |-------------|-------------------------|-----------------------------------------------|
 | 401         | `authentication_failed` | 凭据缺失、错误，或接入方已禁用                |
-| 403         | `forbidden`             | 普通接入方请求 `all=true`                     |
+| 403         | `forbidden`             | 普通接入方请求 `all=true` 或调整审批状态      |
 | 404         | `approval_not_found`    | 单据不存在、无访问权限或超过保留期限          |
 | 409         | `data_version_conflict` | 自定义数据版本不符                            |
 | 409         | `approval_not_pending`  | 单据已处于其他终态，无法取消                  |
+| 409         | `invalid_status_transition` | 截止时间与目标状态不符                    |
 | 422         | `invalid_request`       | 请求 body、参数、截止时间、展示内容或数据无效 |
 | 500         | `internal_error`        | 服务内部异常                                  |
 
