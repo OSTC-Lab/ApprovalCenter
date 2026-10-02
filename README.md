@@ -7,7 +7,7 @@ Clients create approvals through HTTP, reviewers make decisions through Discord 
 
 - Single-step approval with multiple eligible reviewers. The first valid decision is final.
 - Immutable approval content with configurable deadlines and automatic timeout handling.
-- Client cancellation of pending approvals, with final-state preservation and repeatable cancellation calls.
+- Client cancellation of pending approvals.
 - HTTP Basic authentication and isolation between registered clients.
 - Administrator clients for cross-client inspection and custom data updates.
 - Opaque per-approval byte storage with optional optimistic version checks.
@@ -84,18 +84,15 @@ The service does not interpret the payload or display it in Discord.
 
 The payload starts at version `0`.
 Every successful replacement increments its version and updates the approval's `updated_at`.
-Payload updates do not modify approval content, trigger card updates, or extend retention.
+Payload updates do not modify approval content or extend retention.
 Payloads remain writable in final states.
 
-SQLite stores approvals, payloads, and Discord message associations in three tables.
-Creating an approval commits its records before returning an ID.
-Background maintenance publishes or updates its Discord card.
-A persistent `needs_message_sync` flag preserves unfinished synchronization across failures and restarts.
+SQLite persists approvals and their custom data.
+Discord cards are synchronized asynchronously, with unfinished updates retried after failures and restarts.
 
 Queries, decisions, and cancellation enforce the deadline independently of the maintenance interval.
 Records are retained until `expires_at + retention_seconds`.
 Expired records are excluded from API access and removed during maintenance.
-Discord history is retained; deleted cards are not recreated.
 
 Clients are responsible for executing approved operations and matching their execution targets to the approved content.
 
@@ -109,7 +106,6 @@ Clients are responsible for executing approved operations and matching their exe
 
 The bot needs View Channel, Send Messages, Embed Links, and Read Message History permissions.
 It uses the Guilds intent; Message Content and Server Members privileged intents are not required.
-Cards and interaction messages use Chinese.
 
 ### Source deployment
 
@@ -140,14 +136,9 @@ A minimal [Docker Compose template](docker/docker-compose.yml) is available to c
 
 ### Operation and development
 
-Logs are written to the console.
-They include approval IDs, client IDs, decisions, cancellations, timeouts, and synchronization errors;
-credentials and custom payloads are excluded.
+Logs are written to the console without credentials or custom payloads.
 
-Invalid configuration or database initialization errors prevent startup.
 A Discord connection failure leaves HTTP available and health degraded.
-Unfinished message synchronization resumes after a temporary connection failure.
-A stopped bot task is logged and requires a service restart.
 
 The service runs as a single instance.
 Interactive API documentation is available at `/docs`, with the OpenAPI schema at `/openapi.json`.
@@ -159,10 +150,6 @@ uv sync --locked --python 3.13
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python -m mypy src
 ```
-
-Automated tests use temporary SQLite databases and Discord substitutes.
-Live Discord deployment requires validation of card publishing, reviewer permissions, decisions, timeouts,
-and interactions after restart.
 
 ## Configuration
 
@@ -180,7 +167,7 @@ The complete configuration template is available in [config.example.toml](config
 | `database` | string  | `"approval_center.sqlite3"` | SQLite file path                                             |
 
 Relative database paths resolve against the configuration directory.
-Container deployments use `/data/approval_center.sqlite3`. The database parent directory is created when needed.
+Container deployments use `/data/approval_center.sqlite3`.
 
 ### Discord
 
@@ -194,7 +181,7 @@ Container deployments use `/data/approval_center.sqlite3`. The database parent d
 | `reviewer_role_ids` | string array | `[]`     | Eligible reviewer role IDs         |
 
 At least one reviewer list must be non-empty. Current membership and roles are checked when a user makes a decision.
-Each approval stores its destination server and channel; changing configuration does not migrate existing cards.
+Channel changes apply to new approvals; existing approvals keep their original channel.
 
 Omit `proxy_url` to connect directly. To use an HTTP proxy, set it under `[discord]`, for example
 `proxy_url = "http://127.0.0.1:7890"`. Authentication is supported with
@@ -203,9 +190,8 @@ The URL must have a host and an optional port, with no path other than `/`, quer
 Empty values and proxy schemes other than `http://` are rejected.
 
 The proxy must support CONNECT for Discord HTTPS and Gateway WebSocket connections.
-When configured, all bot REST requests, Gateway connections, interaction acknowledgements and follow-up replies,
-and library CDN downloads use this proxy. Proxy failures never fall back to a direct connection.
-System proxy environment variables are not used. Proxy URLs are stored as secrets; restart the service after changing them.
+It applies to all bot connections; proxy failures do not fall back to a direct connection.
+System proxy environment variables are not used.
 
 ### Clients
 
@@ -309,7 +295,6 @@ Display content:
 | `fields[].inline` | boolean      | `false`  | Allow inline layout                     |
 
 The combined length of title, description, and field names and values must not exceed 5500 UTF-16 code units.
-The remaining 500 units of the Discord embed capacity are reserved for service metadata.
 Unknown JSON body and content fields are rejected.
 
 JSON body:
@@ -346,7 +331,7 @@ Response structure:
 }
 ```
 
-Success confirms database persistence. Discord publication is asynchronous.
+Discord card publication is asynchronous.
 
 ### Read an approval
 
@@ -370,9 +355,8 @@ When status is `approved` or `rejected`,
 `decision.reviewer_id` is the reviewer's decimal Discord ID and `decision.decided_at` is the decision timestamp.
 For timeout, the reviewer is null and the decision timestamp equals `expires_at`.
 For cancellation, the reviewer is null and the decision timestamp records when the approval was cancelled.
-`decision.decided_at` records the time at which the terminal state was determined.
 
-Clients can poll this endpoint once per second. A status change is independent of a payload update.
+Clients poll this endpoint to observe approval status changes.
 Multiple updates can share the same second-level `updated_at`; use the payload version for optimistic concurrency.
 
 ### List approvals
@@ -410,16 +394,12 @@ Administrator clients use `all=true` to list all owners. Without that parameter 
 `POST /api/v1/approval/{approval_id}/cancel`
 
 The endpoint has no JSON body. A successful response returns the complete approval structure.
-An unexpired pending approval changes to `cancelled`, records the cancellation time,
-and schedules a Discord card update that displays the final state and disables the decision buttons.
+An unexpired pending approval changes to `cancelled` and records the cancellation time.
 
 Repeating cancellation of a cancelled approval returns HTTP 200 without changing its timestamps.
 Approved, rejected, and timed-out approvals return HTTP 409 with code `approval_not_pending`.
 A pending approval at its deadline becomes `timed_out` before the endpoint returns HTTP 409.
 Missing, inaccessible, or retention-expired approvals return HTTP 404.
-
-Cancellation preserves the approval's content, reference key, payload, payload version, and original deadline.
-Custom data remains writable during the retention period, which is still calculated from `expires_at`.
 
 ### Read custom data
 
