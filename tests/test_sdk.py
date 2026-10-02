@@ -96,15 +96,39 @@ class SdkTests(unittest.TestCase):
 			client.get_approval(sdk.ApprovalIdRequest(approval_id=1))
 
 	def test_http_errors_preserve_response_without_retry(self) -> None:
-		for status in (401, 403, 404, 409, 422, 500):
-			with self.subTest(status=status):
-				self.responses = [httpx.Response(status, content=api.ErrorResponse(code='error', message='details').model_dump_json())]
+		cases = (
+			(401, 'authentication_failed'), (403, 'forbidden'), (404, 'approval_not_found'),
+			(409, 'data_version_conflict'), (409, 'approval_not_pending'), (422, 'invalid_request'), (500, 'internal_error'),
+		)
+		for status, code in cases:
+			with self.subTest(status=status, code=code):
+				self.responses = [httpx.Response(status, content=api.ErrorResponse(code=code, message='details').model_dump_json())]
 				with self.make_client() as client:
-					with self.assertRaises(httpx.HTTPStatusError) as caught:
+					with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 						client.set_approval_data(sdk.ReplaceDataRequest(approval_id=1, data=b'data', expected_version=0))
+				self.assertIsInstance(caught.exception, httpx.HTTPStatusError)
+				self.assertEqual(caught.exception.status_code, status)
+				self.assertEqual(caught.exception.code, code)
+				self.assertEqual(caught.exception.message, 'details')
 				self.assertEqual(caught.exception.response.status_code, status)
 				self.assertEqual(caught.exception.response.json()['message'], 'details')
-		self.assertEqual(len(self.requests), 6)
+				self.assertIs(caught.exception.request, self.requests[-1])
+				self.assertIs(caught.exception.response, caught.exception.__cause__.response)
+		self.assertEqual(len(self.requests), len(cases))
+
+	def test_unstructured_http_errors_keep_httpx_exception(self) -> None:
+		for content in (
+			'<html>Bad Gateway</html>', '{', '{}', 'null', '[]',
+			'{"code": "error"}', '{"code": 123, "message": "details"}', '{"code": "error", "message": null}',
+		):
+			with self.subTest(content=content):
+				self.responses = [httpx.Response(502, content=content)]
+				with self.make_client() as client:
+					with self.assertRaises(httpx.HTTPStatusError) as caught:
+						client.get_approval(sdk.ApprovalIdRequest(approval_id=1))
+				self.assertNotIsInstance(caught.exception, sdk.ApprovalCenterAPIError)
+				self.assertEqual(caught.exception.response.status_code, 502)
+				self.assertEqual(caught.exception.response.text, content)
 
 	def test_sync_cancel_protocol(self) -> None:
 		cancelled = self.approval.model_copy(update={
@@ -228,10 +252,11 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			replaced = await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'new', expected_version=data.version))
 			self.assertEqual(replaced.version, 1)
 			self.assertEqual(replaced.updated_at, 1001)
-			with self.assertRaises(httpx.HTTPStatusError) as caught:
+			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 				await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'stale', expected_version=0))
 			self.assertEqual(caught.exception.response.status_code, 409)
-			self.assertEqual(caught.exception.response.json()['code'], 'data_version_conflict')
+			self.assertEqual(caught.exception.code, 'data_version_conflict')
+			self.assertEqual(caught.exception.message, 'Custom data version does not match')
 			self.assertEqual((await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b''))).version, 2)
 			self.assertEqual((await client.get_approval_data(request)).data, b'')
 			self.now = 1100
@@ -248,15 +273,15 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 		async with self.make_client() as owner:
 			created = await owner.create_approval(sdk.CreateApprovalRequest(content=sdk.ApprovalContent(title='Approval'), expires_at=1100))
 			request = sdk.ApprovalIdRequest(approval_id=created.approval_id)
-			with self.assertRaises(httpx.HTTPStatusError) as caught:
+			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 				await owner.list_approvals(sdk.ApprovalListRequest(all_clients=True))
 			self.assertEqual(caught.exception.response.status_code, 403)
 		async with self.make_client('other') as other:
-			with self.assertRaises(httpx.HTTPStatusError) as caught:
+			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 				await other.get_approval(request)
 			self.assertEqual(caught.exception.response.status_code, 404)
 		async with self.make_client('owner', 'wrong') as invalid:
-			with self.assertRaises(httpx.HTTPStatusError) as caught:
+			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 				await invalid.get_approval(request)
 			self.assertEqual(caught.exception.response.status_code, 401)
 		async with self.make_client('admin') as admin:
@@ -291,7 +316,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			))
 			request = sdk.ApprovalIdRequest(approval_id=created.approval_id)
 			async with self.make_client('other') as other:
-				with self.assertRaises(httpx.HTTPStatusError) as caught:
+				with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 					await other.cancel_approval(request)
 				self.assertEqual(caught.exception.response.status_code, 404)
 			self.now = 1001
@@ -308,10 +333,10 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			self.assertEqual((await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'new'))).version, 1)
 			pending = await client.create_approval(sdk.CreateApprovalRequest(content=sdk.ApprovalContent(title='Timeout'), expires_at=1100))
 			self.now = 1100
-			with self.assertRaises(httpx.HTTPStatusError) as caught:
+			with self.assertRaises(sdk.ApprovalCenterAPIError) as caught:
 				await client.cancel_approval(sdk.ApprovalIdRequest(approval_id=pending.approval_id))
-			self.assertEqual(caught.exception.response.status_code, 409)
-			self.assertEqual(caught.exception.response.json()['code'], 'approval_not_pending')
+			self.assertEqual(caught.exception.status_code, 409)
+			self.assertEqual(caught.exception.code, 'approval_not_pending')
 
 	async def test_async_transport_and_response_errors(self) -> None:
 		error = httpx.ConnectError('Simulated connection failure')

@@ -12,13 +12,14 @@ from types import TracebackType
 from typing import Annotated, Optional, TypeVar
 
 import httpx
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, WithJsonSchema, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, ValidationError, WithJsonSchema, model_validator
 
 __all__ = [
 	'ApprovalStatus', 'DisplayField', 'ApprovalContent', 'ApprovalIdRequest', 'ApprovalListRequest',
 	'CreateApprovalRequest', 'CreateApprovalResponse',
 	'DecisionInfo', 'ApprovalResponse', 'ApprovalListResponse', 'ApprovalDataResponse',
-	'ReplaceDataRequest', 'ReplaceDataResponse', 'ApprovalCenterClient', 'AsyncApprovalCenterClient',
+	'ReplaceDataRequest', 'ReplaceDataResponse', 'ErrorResponse', 'ApprovalCenterAPIError',
+	'ApprovalCenterClient', 'AsyncApprovalCenterClient',
 ]
 
 _MAX_SQLITE_INTEGER = 2 ** 63 - 1
@@ -54,6 +55,21 @@ class _ApiModel(BaseModel):
 
 class _RequestModel(_ApiModel):
 	model_config = ConfigDict(extra='forbid', frozen=True)
+
+
+class ErrorResponse(_ApiModel):
+	code: str
+	message: str
+
+
+class ApprovalCenterAPIError(httpx.HTTPStatusError):
+	"""An HTTP failure with a parsed ApprovalCenter error response."""
+
+	def __init__(self, error: ErrorResponse, response: httpx.Response):
+		super().__init__(f'{response.status_code} {error.code}: {error.message}', request=response.request, response=response)
+		self.status_code = response.status_code
+		self.code = error.code
+		self.message = error.message
 
 
 class ApprovalStatus(str, Enum):
@@ -162,7 +178,14 @@ class ApprovalListRequest(_RequestModel):
 
 
 def _parse_response(response: httpx.Response, response_type: type[_Response]) -> _Response:
-	response.raise_for_status()
+	try:
+		response.raise_for_status()
+	except httpx.HTTPStatusError as error:
+		try:
+			body = ErrorResponse.model_validate_json(response.content, strict=True)
+		except ValidationError:
+			raise error from None
+		raise ApprovalCenterAPIError(body, response) from error
 	return response_type.model_validate_json(response.content)
 
 

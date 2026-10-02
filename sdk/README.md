@@ -22,3 +22,8 @@ Leaving the filter as `None` includes approvals with and without a key.
 
 `cancel_approval` accepts an `ApprovalIdRequest` and returns the complete approval.
 Repeating cancellation of a cancelled approval preserves its cancellation time.
+
+HTTP failures with a valid `code` and `message` response raise `ApprovalCenterAPIError`.
+The exception exposes `status_code`, `code`, and `message`, and retains the original HTTPX `request` and `response`.
+It subclasses `httpx.HTTPStatusError`; other HTTP failures retain that original exception type.
+Network errors and Pydantic validation errors propagate unchanged.
