@@ -12,6 +12,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS approval (
 	approval_id INTEGER PRIMARY KEY AUTOINCREMENT,
 	client_id TEXT NOT NULL,
+	reference_key TEXT,
 	content TEXT NOT NULL,
 	status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timed_out')),
 	created_at INTEGER NOT NULL,
@@ -53,7 +54,7 @@ FROM approval AS a JOIN approval_data AS d USING (approval_id)
 
 def approval_from_row(row: aiosqlite.Row) -> Approval:
 	return Approval(
-		approval_id=row['approval_id'], client_id=row['client_id'],
+		approval_id=row['approval_id'], client_id=row['client_id'], reference_key=row['reference_key'],
 		content=ApprovalContent.model_validate_json(row['content']), status=row['status'],
 		created_at=row['created_at'], expires_at=row['expires_at'], updated_at=row['updated_at'],
 		reviewer_id=row['reviewer_id'], decided_at=row['decided_at'],
@@ -82,10 +83,10 @@ class Transaction:
 			message_id=row['message_id'], needs_message_sync=bool(row['needs_message_sync']),
 		)
 
-	async def create(self, client_id: str, content: ApprovalContent, expires_at: int, data: bytes, guild_id: str, channel_id: str, now: int) -> Approval:
+	async def create(self, client_id: str, content: ApprovalContent, expires_at: int, data: bytes, guild_id: str, channel_id: str, now: int, *, reference_key: str | None = None) -> Approval:
 		async with self.connection.execute(
-			'INSERT INTO approval (client_id, content, created_at, expires_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-			(client_id, content.model_dump_json(), now, expires_at, now),
+			'INSERT INTO approval (client_id, reference_key, content, created_at, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+			(client_id, reference_key, content.model_dump_json(), now, expires_at, now),
 		) as cursor:
 			approval_id = cursor.lastrowid
 		if approval_id is None:
@@ -93,7 +94,7 @@ class Transaction:
 		await self.connection.execute('INSERT INTO approval_data (approval_id, data) VALUES (?, ?)', (approval_id, data))
 		await self.connection.execute('INSERT INTO approval_discord (approval_id, guild_id, channel_id) VALUES (?, ?, ?)', (approval_id, guild_id, channel_id))
 		return Approval(
-			approval_id=approval_id, client_id=client_id, content=content, status=ApprovalStatus.PENDING,
+			approval_id=approval_id, client_id=client_id, reference_key=reference_key, content=content, status=ApprovalStatus.PENDING,
 			created_at=now, expires_at=expires_at, updated_at=now, reviewer_id=None, decided_at=None,
 			data=data, data_version=0,
 		)
@@ -127,6 +128,7 @@ class Transaction:
 				parameters.append(value)
 
 		add('a.client_id = ?', client_id)
+		add('a.reference_key = ?', filters.reference_key)
 		add('a.status = ?', filters.status.value if filters.status is not None else None)
 		add('a.created_at >= ?', filters.created_from)
 		add('a.created_at < ?', filters.created_before)

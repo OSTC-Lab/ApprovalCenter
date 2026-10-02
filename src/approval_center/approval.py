@@ -59,6 +59,7 @@ class ApprovalContent(StoredModel):
 class Approval(StoredModel):
 	approval_id: int
 	client_id: str
+	reference_key: str | None
 	content: ApprovalContent
 	status: ApprovalStatus
 	created_at: int
@@ -81,6 +82,7 @@ class MessageLink(StoredModel):
 @dataclass(frozen=True)
 class ApprovalFilter:
 	status: ApprovalStatus | None = None
+	reference_key: str | None = None
 	created_from: int | None = None
 	created_before: int | None = None
 	updated_from: int | None = None
@@ -131,13 +133,13 @@ class ApprovalService:
 		if len(data) > self.policy.max_data_bytes:
 			raise ApprovalError('invalid_request', 'Custom data exceeds the configured size limit', 422)
 
-	async def create(self, client: ClientConfig, content: ApprovalContent, expires_at: int, data: bytes = b'') -> Approval:
+	async def create(self, client: ClientConfig, content: ApprovalContent, expires_at: int, data: bytes = b'', *, reference_key: str | None = None) -> Approval:
 		self._check_data(data)
 		now = self.now()
 		if not now < expires_at <= now + self.policy.max_approval_seconds:
 			raise ApprovalError('invalid_request', 'Approval deadline must be in the future and within the configured limit', 422)
 		async with self.storage.transaction() as transaction:
-			approval = await transaction.create(client.client_id, content, expires_at, data, self.guild_id, self.channel_id, now)
+			approval = await transaction.create(client.client_id, content, expires_at, data, self.guild_id, self.channel_id, now, reference_key=reference_key)
 		LOGGER.info('Approval created approval_id=%s client_id=%s', approval.approval_id, client.client_id)
 		return approval
 

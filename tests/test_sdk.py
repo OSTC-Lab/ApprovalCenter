@@ -32,7 +32,7 @@ class SdkTests(unittest.TestCase):
 		self.requests: list[httpx.Request] = []
 		self.responses: list[httpx.Response] = []
 		self.created = api.CreateApprovalResponse(
-			approval_id=1, status=ApprovalStatus.PENDING, created_at=1000, expires_at=1100, updated_at=1000,
+			approval_id=1, reference_key='survival/Steve', status=ApprovalStatus.PENDING, created_at=1000, expires_at=1100, updated_at=1000,
 		)
 		self.approval = api.ApprovalResponse(
 			**self.created.model_dump(), client_id='client', content=ApprovalContent(title='申请', description='理由'),
@@ -59,15 +59,17 @@ class SdkTests(unittest.TestCase):
 		client = self.make_client()
 		with client:
 			created = client.create_approval(sdk.CreateApprovalRequest(
-				content=sdk.ApprovalContent(title='申请', description='理由'), expires_at=1100, data=b'\x00\xff',
+				content=sdk.ApprovalContent(title='申请', description='理由'), expires_at=1100, data=b'\x00\xff', reference_key='survival/Steve',
 			))
 			self.assertEqual(created.approval_id, 1)
+			self.assertEqual(created.reference_key, 'survival/Steve')
 			self.assertIs(created.status, sdk.ApprovalStatus.PENDING)
 			approval = client.get_approval(sdk.ApprovalIdRequest(approval_id=created.approval_id))
 			self.assertEqual(approval.data, b'\x00\xff')
 			self.assertEqual(approval.content.title, '申请')
+			self.assertEqual(approval.reference_key, 'survival/Steve')
 			page = client.list_approvals(sdk.ApprovalListRequest(
-				status=sdk.ApprovalStatus.PENDING, created_from=1000, created_before=1100,
+				status=sdk.ApprovalStatus.PENDING, reference_key='survival/Steve', created_from=1000, created_before=1100,
 				updated_from=1001, updated_before=1101, limit=2, offset=3, all_clients=True,
 			))
 			self.assertEqual(page.items, [approval])
@@ -82,9 +84,10 @@ class SdkTests(unittest.TestCase):
 		create = api.CreateApprovalRequest.model_validate_json(self.requests[0].content)
 		self.assertEqual(create.data, b'\x00\xff')
 		self.assertEqual(create.content.title, '申请')
+		self.assertEqual(create.reference_key, 'survival/Steve')
 		self.assertEqual(self.requests[0].method, 'POST')
 		self.assertEqual(str(self.requests[2].url.params),
-			'status=pending&created_from=1000&created_before=1100&updated_from=1001&updated_before=1101&limit=2&offset=3&all=true')
+			'status=pending&reference_key=survival%2FSteve&created_from=1000&created_before=1100&updated_from=1001&updated_before=1101&limit=2&offset=3&all=true')
 		self.assertEqual(self.requests[3].url.path, '/prefix/api/v1/approval-data/1')
 		self.assertEqual(self.requests[4].method, 'PUT')
 		self.assertEqual(api.ReplaceDataRequest.model_validate_json(self.requests[4].content).expected_version, 0)
@@ -246,6 +249,25 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			self.assertEqual(len((await admin.list_approvals(sdk.ApprovalListRequest(all_clients=True))).items), 1)
 			self.assertEqual((await admin.get_approval(request)).client_id, 'owner')
 			self.assertEqual((await admin.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'admin'))).version, 1)
+
+	async def test_actual_api_reference_key_query_semantics(self) -> None:
+		async with self.make_client() as client:
+			first = await client.create_approval(sdk.CreateApprovalRequest(content=sdk.ApprovalContent(title='Unkeyed'), expires_at=1100))
+			self.assertIsNone(first.reference_key)
+			key = 'survival/玩家 ?&%'
+			second = await client.create_approval(sdk.CreateApprovalRequest(
+				content=sdk.ApprovalContent(title='Keyed'), expires_at=1100, reference_key=key,
+			))
+			self.assertEqual(second.reference_key, key)
+			page = await client.list_approvals(sdk.ApprovalListRequest(reference_key=key))
+			self.assertEqual([item.approval_id for item in page.items], [second.approval_id])
+			self.assertEqual(page.items[0].reference_key, key)
+			page = await client.list_approvals(sdk.ApprovalListRequest(reference_key=None))
+			self.assertEqual(len(page.items), 2)
+			self.assertIsNone(page.items[-1].reference_key)
+			self.assertEqual((await client.list_approvals(sdk.ApprovalListRequest(reference_key='null'))).items, [])
+			await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=second.approval_id, data=b'updated'))
+			self.assertEqual((await client.get_approval(sdk.ApprovalIdRequest(approval_id=second.approval_id))).reference_key, key)
 
 	async def test_async_transport_and_response_errors(self) -> None:
 		error = httpx.ConnectError('Simulated connection failure')

@@ -49,10 +49,12 @@ class CreateApprovalRequest(ApiModel):
 	content: ApprovalContent
 	expires_at: UnixTime
 	data: Base64Data = b''
+	reference_key: str | None = None
 
 
 class CreateApprovalResponse(ApiModel):
 	approval_id: int
+	reference_key: str | None
 	status: ApprovalStatus
 	created_at: int
 	expires_at: int
@@ -75,7 +77,7 @@ class ApprovalResponse(CreateApprovalResponse):
 	def of(cls, approval: Approval) -> 'ApprovalResponse':
 		decision = None if approval.decided_at is None else DecisionInfo(reviewer_id=approval.reviewer_id, decided_at=approval.decided_at)
 		return cls(
-			approval_id=approval.approval_id, status=approval.status, client_id=approval.client_id,
+			approval_id=approval.approval_id, status=approval.status, client_id=approval.client_id, reference_key=approval.reference_key,
 			content=approval.content, created_at=approval.created_at, expires_at=approval.expires_at,
 			updated_at=approval.updated_at, decision=decision, data=approval.data, data_version=approval.data_version,
 		)
@@ -161,15 +163,15 @@ def install_api(app: FastAPI, config: Config, service_provider: Callable[[], App
 
 	@app.post('/api/v1/approval', response_model=CreateApprovalResponse, status_code=201)
 	async def create_approval(body: CreateApprovalRequest, client: Client) -> CreateApprovalResponse:
-		approval = await service_provider().create(client, body.content, body.expires_at, body.data)
+		approval = await service_provider().create(client, body.content, body.expires_at, body.data, reference_key=body.reference_key)
 		return CreateApprovalResponse(
-			approval_id=approval.approval_id, status=approval.status, created_at=approval.created_at,
+			approval_id=approval.approval_id, reference_key=approval.reference_key, status=approval.status, created_at=approval.created_at,
 			expires_at=approval.expires_at, updated_at=approval.updated_at,
 		)
 
 	@app.get('/api/v1/approval', response_model=ApprovalListResponse)
 	async def list_approvals(
-		client: Client, status: ApprovalStatus | None = None,
+		client: Client, status: ApprovalStatus | None = None, reference_key: str | None = None,
 		created_from: Annotated[int | None, Query(ge=0, le=MAX_SQLITE_INTEGER)] = None,
 		created_before: Annotated[int | None, Query(ge=0, le=MAX_SQLITE_INTEGER)] = None,
 		updated_from: Annotated[int | None, Query(ge=0, le=MAX_SQLITE_INTEGER)] = None,
@@ -178,7 +180,7 @@ def install_api(app: FastAPI, config: Config, service_provider: Callable[[], App
 		all: bool = False,
 	) -> ApprovalListResponse:
 		filters = ApprovalFilter(
-			status=status, created_from=created_from, created_before=created_before,
+			status=status, reference_key=reference_key, created_from=created_from, created_before=created_before,
 			updated_from=updated_from, updated_before=updated_before, limit=limit, offset=offset, all_clients=all,
 		)
 		items = await service_provider().list_approvals(client, filters)

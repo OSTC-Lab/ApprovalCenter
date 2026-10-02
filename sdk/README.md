@@ -15,3 +15,7 @@ python -m pip install httpx 'pydantic>=2,<3'
 
 Use `ApprovalCenterClient` for synchronous code or `AsyncApprovalCenterClient` for asynchronous code.
 Both use the service base URL, `client_id`, and `client_secret`
+
+Set `CreateApprovalRequest.reference_key` to associate approvals with a business object.
+Use the same string in `ApprovalListRequest.reference_key` for exact-match filtering.
+Leaving the filter as `None` includes approvals with and without a key.

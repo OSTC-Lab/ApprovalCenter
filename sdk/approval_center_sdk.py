@@ -96,10 +96,12 @@ class CreateApprovalRequest(_RequestModel):
 	content: ApprovalContent
 	expires_at: _UnixTime
 	data: _Base64Data = b''
+	reference_key: Optional[str] = None
 
 
 class CreateApprovalResponse(_ApiModel):
 	approval_id: int
+	reference_key: Optional[str]
 	status: ApprovalStatus
 	created_at: int
 	expires_at: int
@@ -148,6 +150,7 @@ class ReplaceDataResponse(_ApiModel):
 
 class ApprovalListRequest(_RequestModel):
 	status: Optional[ApprovalStatus] = None
+	reference_key: Optional[str] = None
 	created_from: Optional[_UnixTime] = None
 	created_before: Optional[_UnixTime] = None
 	updated_from: Optional[_UnixTime] = None

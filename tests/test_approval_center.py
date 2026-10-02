@@ -90,8 +90,8 @@ class ApprovalFixture(unittest.IsolatedAsyncioTestCase):
 		await self.storage.close()
 		self.temp.cleanup()
 
-	async def create(self, *, owner: ClientConfig | None = None, expires_at: int = 1100):
-		return await self.service.create(owner or self.owner, self.content, expires_at, b'\x00\xff')
+	async def create(self, *, owner: ClientConfig | None = None, expires_at: int = 1100, reference_key: str | None = None):
+		return await self.service.create(owner or self.owner, self.content, expires_at, b'\x00\xff', reference_key=reference_key)
 
 	async def assert_error(self, expected_code: int, operation: Awaitable[object]) -> None:
 		with self.assertRaises(ApprovalError) as caught:
@@ -179,6 +179,42 @@ class ApprovalTests(ApprovalFixture):
 		self.assertEqual(await self.service.pending_messages(), [])
 		await self.assert_error(422, self.service.replace_data(self.owner, 1, b'012345678', None))
 		self.assertEqual((await self.service.get(self.owner, 1)).data_version, 2)
+
+	async def test_reference_key_scope_filters_and_persistence(self) -> None:
+		key = 'survival/Steve'
+		first = await self.create(reference_key=key, expires_at=1001)
+		second = await self.create(reference_key=key)
+		foreign = await self.create(owner=self.other, reference_key=key)
+		await self.create(reference_key='survival/steve')
+		await self.create(reference_key='survival/Steve/other')
+		unkeyed = await self.create()
+		self.assertIsNone(unkeyed.reference_key)
+		self.assertEqual((await self.service.get(self.owner, second.approval_id)).reference_key, key)
+		items = await self.service.list_approvals(self.owner, ApprovalFilter(reference_key=key))
+		self.assertEqual([item.approval_id for item in items], [second.approval_id, first.approval_id])
+		items = await self.service.list_approvals(self.owner, ApprovalFilter(reference_key=key, limit=1, offset=1))
+		self.assertEqual([item.approval_id for item in items], [first.approval_id])
+		self.assertEqual(len(await self.service.list_approvals(self.owner, ApprovalFilter())), 5)
+		self.assertEqual(await self.service.list_approvals(self.admin, ApprovalFilter(reference_key=key)), [])
+		items = await self.service.list_approvals(self.admin, ApprovalFilter(reference_key=key, all_clients=True))
+		self.assertEqual([item.approval_id for item in items], [foreign.approval_id, second.approval_id, first.approval_id])
+		await self.assert_error(403, self.service.list_approvals(self.owner, ApprovalFilter(reference_key=key, all_clients=True)))
+		self.clock.seconds = 1001
+		items = await self.service.list_approvals(self.owner, ApprovalFilter(reference_key=key, status=ApprovalStatus.PENDING))
+		self.assertEqual([item.approval_id for item in items], [second.approval_id])
+		items = await self.service.list_approvals(self.owner, ApprovalFilter(reference_key=key, updated_from=1001, updated_before=1002))
+		self.assertEqual([item.approval_id for item in items], [first.approval_id])
+		for literal in ('%', "' OR 1=1 --", '', '服务器/玩家'):
+			with self.subTest(literal=literal):
+				created = await self.create(reference_key=literal)
+				items = await self.service.list_approvals(self.owner, ApprovalFilter(reference_key=literal))
+				self.assertEqual([item.approval_id for item in items], [created.approval_id])
+		updated = await self.service.replace_data(self.owner, second.approval_id, b'updated', None)
+		self.assertEqual(updated.reference_key, key)
+		await self.storage.close()
+		self.storage = await Storage.open(self.path)
+		self.service.storage = self.storage
+		self.assertEqual((await self.service.get(self.owner, second.approval_id)).reference_key, key)
 
 	async def test_concurrent_versioned_writes(self) -> None:
 		await self.create()
@@ -450,6 +486,32 @@ class ApiTests(ApprovalFixture):
 		self.assertEqual(response.json()['items'][0]['client_id'], 'owner')
 		response = await self.http.put('/api/v1/approval-data/1', auth=('admin', 'secret'), json={'data': 'YQ=='})
 		self.assertEqual(response.status_code, 200)
+
+	async def test_api_reference_key_creation_filter_and_immutability(self) -> None:
+		for key in (None, '', '服务器/Steve', '服务器/Steve', '服务器/steve'):
+			response = await self.http.post('/api/v1/approval', json={
+				'content': {'title': 'Approval'}, 'expires_at': 1100, 'reference_key': key,
+			})
+			self.assertEqual(response.status_code, 201, response.text)
+			self.assertEqual(response.json()['reference_key'], key)
+		response = await self.http.get('/api/v1/approval/3')
+		self.assertEqual(response.json()['reference_key'], '服务器/Steve')
+		response = await self.http.get('/api/v1/approval', params={'reference_key': '服务器/Steve', 'limit': 1, 'offset': 1})
+		self.assertEqual([item['approval_id'] for item in response.json()['items']], [3])
+		for key, expected in (('服务器/Steve', [4, 3]), ('', [2]), ('null', []), ('%', [])):
+			response = await self.http.get('/api/v1/approval', params={'reference_key': key})
+			self.assertEqual([item['approval_id'] for item in response.json()['items']], expected)
+		response = await self.http.get('/api/v1/approval')
+		self.assertEqual(len(response.json()['items']), 5)
+		self.assertIsNone(response.json()['items'][-1]['reference_key'])
+		response = await self.http.put('/api/v1/approval-data/3', json={'data': '', 'reference_key': 'changed'})
+		self.assertEqual(response.status_code, 422)
+		self.assertEqual((await self.http.get('/api/v1/approval/3')).json()['reference_key'], '服务器/Steve')
+		for key in (123, True, [], {}):
+			response = await self.http.post('/api/v1/approval', json={
+				'content': {'title': 'Approval'}, 'expires_at': 1100, 'reference_key': key,
+			})
+			self.assertEqual(response.status_code, 422)
 
 	async def test_api_invalid_inputs_and_health(self) -> None:
 		for data in ('!!!', '汉字', 123, None):

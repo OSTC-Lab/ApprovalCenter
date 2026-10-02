@@ -58,6 +58,10 @@ Each approval has a non-reused, auto-incrementing integer `approval_id`.
 Approval content contains a title, description, and ordered display fields.
 The service stores and renders this content without interpreting its business meaning.
 
+An optional, immutable `reference_key` associates approvals with a client-defined business object.
+The service stores it as an opaque string and supports exact-match listing.
+Multiple approvals can share the same key. Clients define the key's format and scope.
+
 All API timestamps are integer Unix timestamps in seconds.
 
 | Status      | Meaning                                           |
@@ -279,11 +283,12 @@ Clients cannot choose an owner during creation.
 
 `POST /api/v1/approval`
 
-| Body field   | Type    | Required | Description                                      |
-|--------------|---------|----------|--------------------------------------------------|
-| `content`    | object  | Yes      | Immutable display content                        |
-| `expires_at` | integer | Yes      | Future Unix deadline in seconds                  |
-| `data`       | string  | No       | Standard Base64 payload; defaults to empty bytes |
+| Body field      | Type           | Required | Description                                          |
+|-----------------|----------------|----------|------------------------------------------------------|
+| `content`       | object         | Yes      | Immutable display content                            |
+| `expires_at`    | integer        | Yes      | Future Unix deadline in seconds                      |
+| `data`          | string         | No       | Standard Base64 payload; defaults to empty bytes     |
+| `reference_key` | string or null | No       | Immutable business association key; defaults to null |
 
 The deadline must be strictly later than service time and within `max_approval_seconds`.
 
@@ -316,6 +321,7 @@ JSON body:
     ]
   },
   "expires_at": 1790866200,
+  "reference_key": "survival/Steve",
   "data": ""
 }
 ```
@@ -327,6 +333,7 @@ Response structure:
 ```json
 {
   "approval_id": 1,
+  "reference_key": "survival/Steve",
   "status": "pending",
   "created_at": 1790865600,
   "expires_at": 1790866200,
@@ -340,18 +347,19 @@ Success confirms database persistence. Discord publication is asynchronous.
 
 `GET /api/v1/approval/{approval_id}`
 
-| Response field | Type           | Description                                                           |
-|----------------|----------------|-----------------------------------------------------------------------|
-| `approval_id`  | integer        | Unique approval ID                                                    |
-| `client_id`    | string         | Creating client's ID                                                  |
-| `content`      | object         | Original display content                                              |
-| `status`       | string         | `pending`, `approved`, `rejected`, or `timed_out`                     |
-| `created_at`   | integer        | Creation timestamp                                                    |
-| `expires_at`   | integer        | Decision deadline                                                     |
-| `updated_at`   | integer        | Last status or payload change                                         |
-| `decision`     | object or null | Null while pending; otherwise contains `reviewer_id` and `decided_at` |
-| `data`         | string         | Current Base64 payload                                                |
-| `data_version` | integer        | Current payload version                                               |
+| Response field  | Type           | Description                                                           |
+|-----------------|----------------|-----------------------------------------------------------------------|
+| `approval_id`   | integer        | Unique approval ID                                                    |
+| `client_id`     | string         | Creating client's ID                                                  |
+| `reference_key` | string or null | Original business association key                                     |
+| `content`       | object         | Original display content                                              |
+| `status`        | string         | `pending`, `approved`, `rejected`, or `timed_out`                     |
+| `created_at`    | integer        | Creation timestamp                                                    |
+| `expires_at`    | integer        | Decision deadline                                                     |
+| `updated_at`    | integer        | Last status or payload change                                         |
+| `decision`      | object or null | Null while pending; otherwise contains `reviewer_id` and `decided_at` |
+| `data`          | string         | Current Base64 payload                                                |
+| `data_version`  | integer        | Current payload version                                               |
 
 When status is `approved` or `rejected`,
 `decision.reviewer_id` is the reviewer's decimal Discord ID and `decision.decided_at` is the decision timestamp.
@@ -364,19 +372,25 @@ Multiple updates can share the same second-level `updated_at`; use the payload v
 
 `GET /api/v1/approval`
 
-| Query parameter  | Type    | Default | Description                              |
-|------------------|---------|---------|------------------------------------------|
-| `status`         | string  | Unset   | Filter by one approval status            |
-| `created_from`   | integer | Unset   | Inclusive creation timestamp lower bound |
-| `created_before` | integer | Unset   | Exclusive creation timestamp upper bound |
-| `updated_from`   | integer | Unset   | Inclusive update timestamp lower bound   |
-| `updated_before` | integer | Unset   | Exclusive update timestamp upper bound   |
-| `limit`          | integer | `100`   | Page size, from 1 to 1000                |
-| `offset`         | integer | `0`     | Non-negative number of records to skip   |
-| `all`            | boolean | `false` | Administrator-only full-client scope     |
+| Query parameter  | Type    | Default | Description                                 |
+|------------------|---------|---------|---------------------------------------------|
+| `status`         | string  | Unset   | Filter by one approval status               |
+| `reference_key`  | string  | Unset   | Exact match on the business association key |
+| `created_from`   | integer | Unset   | Inclusive creation timestamp lower bound    |
+| `created_before` | integer | Unset   | Exclusive creation timestamp upper bound    |
+| `updated_from`   | integer | Unset   | Inclusive update timestamp lower bound      |
+| `updated_before` | integer | Unset   | Exclusive update timestamp upper bound      |
+| `limit`          | integer | `100`   | Page size, from 1 to 1000                   |
+| `offset`         | integer | `0`     | Non-negative number of records to skip      |
+| `all`            | boolean | `false` | Administrator-only full-client scope        |
 
 When both bounds of a time range are supplied, the lower bound must be less than the upper bound.
 Results are ordered by `created_at DESC, approval_id DESC`.
+
+Omitting `reference_key` leaves the listing unrestricted by key, including approvals with a null key.
+Supplying it matches the stored string exactly, including case; approvals with a null key never match.
+The query value `null` is a literal string, and an empty query value matches only an empty stored string.
+Key filtering applies together with client ownership, status, time ranges, and pagination.
 
 The response contains `items`, `limit`, and `offset`. Each item has the complete approval structure described above.
 Increase the offset to read subsequent pages; a page shorter than the limit ends the current listing.
