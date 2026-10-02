@@ -7,6 +7,7 @@ Clients create approvals through HTTP, reviewers make decisions through Discord 
 
 - Single-step approval with multiple eligible reviewers. The first valid decision is final.
 - Immutable approval content with configurable deadlines and automatic timeout handling.
+- Client cancellation of pending approvals, with final-state preservation and repeatable cancellation calls.
 - HTTP Basic authentication and isolation between registered clients.
 - Administrator clients for cross-client inspection and custom data updates.
 - Opaque per-approval byte storage with optional optimistic version checks.
@@ -32,7 +33,7 @@ flowchart LR
         maintenance["Periodic maintenance"]
     end
 
-    client <-->|Create, poll, replace data| api
+    client <-->|Create, cancel, poll, replace data| api
     api <-->|Operations and results| service
     service <-->|Persist and query| database
     reviewers -->|Approve or reject| platform
@@ -64,14 +65,15 @@ Multiple approvals can share the same key. Clients define the key's format and s
 
 All API timestamps are integer Unix timestamps in seconds.
 
-| Status      | Meaning                                           |
-|-------------|---------------------------------------------------|
-| `pending`   | Awaiting a decision before the deadline           |
-| `approved`  | Approved by an eligible reviewer                  |
-| `rejected`  | Rejected by an eligible reviewer                  |
-| `timed_out` | The deadline was reached without a valid decision |
+| Status      | Meaning                                                   |
+|-------------|-----------------------------------------------------------|
+| `pending`   | Awaiting a decision before the deadline                   |
+| `approved`  | Approved by an eligible reviewer                          |
+| `rejected`  | Rejected by an eligible reviewer                          |
+| `timed_out` | The deadline was reached without a valid decision         |
+| `cancelled` | Cancelled by the owning client or an administrator client |
 
-The final three states cannot change. `expires_at` bounds the decision window.
+The four terminal states cannot change. `expires_at` bounds the decision and cancellation window.
 An approval in the approved state retains that state after the deadline.
 Clients define the validity and consumption rules for approved operations.
 
@@ -90,7 +92,7 @@ Creating an approval commits its records before returning an ID.
 Background maintenance publishes or updates its Discord card.
 A persistent `needs_message_sync` flag preserves unfinished synchronization across failures and restarts.
 
-Queries and decisions enforce the deadline independently of the maintenance interval.
+Queries, decisions, and cancellation enforce the deadline independently of the maintenance interval.
 Records are retained until `expires_at + retention_seconds`.
 Expired records are excluded from API access and removed during maintenance.
 Discord history is retained; deleted cards are not recreated.
@@ -139,7 +141,7 @@ A minimal [Docker Compose template](docker/docker-compose.yml) is available to c
 ### Operation and development
 
 Logs are written to the console.
-They include approval IDs, client IDs, decisions, timeouts, and synchronization errors;
+They include approval IDs, client IDs, decisions, cancellations, timeouts, and synchronization errors;
 credentials and custom payloads are excluded.
 
 Invalid configuration or database initialization errors prevent startup.
@@ -254,7 +256,8 @@ Authorization: Basic <base64(client_id:client_secret)>
 Content-Type: application/json
 ```
 
-POST and PUT bodies use JSON with `Content-Type: application/json`. GET endpoints have no JSON body.
+Endpoints with a JSON body require `Content-Type: application/json`.
+GET endpoints and the cancellation endpoint have no JSON body.
 The health endpoint does not require authentication.
 
 | Operation                   | Regular client    | Administrator client   |
@@ -264,20 +267,22 @@ The health endpoint does not require authentication.
 | List with `all=true`        | HTTP 403          | All clients' approvals |
 | Read an approval or payload | Its own approvals | Any client's approvals |
 | Replace a payload           | Its own approvals | Any client's approvals |
+| Cancel a pending approval   | Its own approvals | Any client's approvals |
 
 An inaccessible approval and a nonexistent approval both return HTTP 404.
 Clients cannot choose an owner during creation.
 
 ### Endpoint summary
 
-| Method | Path                                  | Success |
-|--------|---------------------------------------|---------|
-| POST   | `/api/v1/approval`                    | 201     |
-| GET    | `/api/v1/approval`                    | 200     |
-| GET    | `/api/v1/approval/{approval_id}`      | 200     |
-| GET    | `/api/v1/approval-data/{approval_id}` | 200     |
-| PUT    | `/api/v1/approval-data/{approval_id}` | 200     |
-| GET    | `/heathz`                             | 200     |
+| Method | Path                                    | Success |
+|--------|-----------------------------------------|---------|
+| POST   | `/api/v1/approval`                      | 201     |
+| GET    | `/api/v1/approval`                      | 200     |
+| GET    | `/api/v1/approval/{approval_id}`        | 200     |
+| POST   | `/api/v1/approval/{approval_id}/cancel` | 200     |
+| GET    | `/api/v1/approval-data/{approval_id}`   | 200     |
+| PUT    | `/api/v1/approval-data/{approval_id}`   | 200     |
+| GET    | `/heathz`                               | 200     |
 
 ### Create an approval
 
@@ -353,7 +358,7 @@ Success confirms database persistence. Discord publication is asynchronous.
 | `client_id`     | string         | Creating client's ID                                                  |
 | `reference_key` | string or null | Original business association key                                     |
 | `content`       | object         | Original display content                                              |
-| `status`        | string         | `pending`, `approved`, `rejected`, or `timed_out`                     |
+| `status`        | string         | `pending`, `approved`, `rejected`, `timed_out`, or `cancelled`        |
 | `created_at`    | integer        | Creation timestamp                                                    |
 | `expires_at`    | integer        | Decision deadline                                                     |
 | `updated_at`    | integer        | Last status or payload change                                         |
@@ -364,6 +369,8 @@ Success confirms database persistence. Discord publication is asynchronous.
 When status is `approved` or `rejected`,
 `decision.reviewer_id` is the reviewer's decimal Discord ID and `decision.decided_at` is the decision timestamp.
 For timeout, the reviewer is null and the decision timestamp equals `expires_at`.
+For cancellation, the reviewer is null and the decision timestamp records when the approval was cancelled.
+`decision.decided_at` records the time at which the terminal state was determined.
 
 Clients can poll this endpoint once per second. A status change is independent of a payload update.
 Multiple updates can share the same second-level `updated_at`; use the payload version for optimistic concurrency.
@@ -398,6 +405,22 @@ Offset pagination reflects current data rather than a fixed snapshot.
 
 Administrator clients use `all=true` to list all owners. Without that parameter they receive only their own approvals.
 
+### Cancel an approval
+
+`POST /api/v1/approval/{approval_id}/cancel`
+
+The endpoint has no JSON body. A successful response returns the complete approval structure.
+An unexpired pending approval changes to `cancelled`, records the cancellation time,
+and schedules a Discord card update that displays the final state and disables the decision buttons.
+
+Repeating cancellation of a cancelled approval returns HTTP 200 without changing its timestamps.
+Approved, rejected, and timed-out approvals return HTTP 409 with code `approval_not_pending`.
+A pending approval at its deadline becomes `timed_out` before the endpoint returns HTTP 409.
+Missing, inaccessible, or retention-expired approvals return HTTP 404.
+
+Cancellation preserves the approval's content, reference key, payload, payload version, and original deadline.
+Custom data remains writable during the retention period, which is still calculated from `expires_at`.
+
 ### Read custom data
 
 `GET /api/v1/approval-data/{approval_id}`
@@ -410,7 +433,7 @@ Administrator clients use `all=true` to list all owners. Without that parameter 
 }
 ```
 
-`updated_at` is the approval timestamp and can also change because of an approval decision or timeout.
+`updated_at` is the approval timestamp and can also change because of a decision, timeout, or cancellation.
 
 ### Replace custom data
 
@@ -477,14 +500,15 @@ Errors use a stable code and a readable message:
 }
 ```
 
-| HTTP status | Code                    | Meaning                                                          |
-|-------------|-------------------------|------------------------------------------------------------------|
-| 401         | `authentication_failed` | Missing, invalid, or disabled client credentials                 |
-| 403         | `forbidden`             | A regular client requested `all=true`                            |
-| 404         | `approval_not_found`    | Missing, inaccessible, or retention-expired approval             |
-| 409         | `data_version_conflict` | Payload version mismatch                                         |
-| 422         | `invalid_request`       | Invalid body, query, path, deadline, display content, or payload |
-| 500         | `internal_error`        | Unexpected service failure                                       |
+| HTTP status | Code                    | Meaning                                                                       |
+|-------------|-------------------------|-------------------------------------------------------------------------------|
+| 401         | `authentication_failed` | Missing, invalid, or disabled client credentials                              |
+| 403         | `forbidden`             | A regular client requested `all=true`                                         |
+| 404         | `approval_not_found`    | Missing, inaccessible, or retention-expired approval                          |
+| 409         | `data_version_conflict` | Payload version mismatch                                                      |
+| 409         | `approval_not_pending`  | Cancellation requires a pending approval; other terminal states cannot change |
+| 422         | `invalid_request`       | Invalid body, query, path, deadline, display content, or payload              |
+| 500         | `internal_error`        | Unexpected service failure                                                    |
 
 Framework errors such as unknown paths or unsupported methods use `http_error` with their corresponding HTTP status.
 Authentication failures include a `WWW-Authenticate: Basic` header.

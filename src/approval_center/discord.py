@@ -40,6 +40,8 @@ def status_text(status: ApprovalStatus) -> str:
 			return '已拒绝'
 		case ApprovalStatus.TIMED_OUT:
 			return '已超时'
+		case ApprovalStatus.CANCELLED:
+			return '已取消'
 
 
 def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
@@ -49,6 +51,7 @@ def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
 		ApprovalStatus.APPROVED: 0x2ECC71,
 		ApprovalStatus.REJECTED: 0xE74C3C,
 		ApprovalStatus.TIMED_OUT: 0x95A5A6,
+		ApprovalStatus.CANCELLED: 0x95A5A6,
 	}[approval.status]
 	embed = discord.Embed(title=approval.content.title, description=approval.content.description or None, color=color)
 	embed.set_author(name=display_name)
@@ -56,7 +59,8 @@ def render_card(snapshot: MessageSnapshot, display_name: str) -> discord.Embed:
 		embed.add_field(name=field.name, value=field.value, inline=field.inline)
 	footer = f'单号：{approval.approval_id} | 状态：{status_text(approval.status)} | 截止时间：{approval.expires_at}'
 	if approval.decided_at is not None:
-		footer += f' | 决定时间：{approval.decided_at}'
+		label = '取消时间' if approval.status == ApprovalStatus.CANCELLED else '决定时间'
+		footer += f' | {label}：{approval.decided_at}'
 	if approval.reviewer_id is not None:
 		footer += f' | 审批人：{approval.reviewer_id}'
 	embed.set_footer(text=footer)

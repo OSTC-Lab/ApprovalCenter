@@ -61,6 +61,7 @@ class ApprovalStatus(str, Enum):
 	APPROVED = 'approved'
 	REJECTED = 'rejected'
 	TIMED_OUT = 'timed_out'
+	CANCELLED = 'cancelled'
 
 
 class DisplayField(_ApiModel):
@@ -199,6 +200,10 @@ class ApprovalCenterClient:
 	def get_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
 		return self._request('GET', f'/api/v1/approval/{request.approval_id}', ApprovalResponse)
 
+	def cancel_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
+		"""Cancel a pending approval. Repeated cancellation preserves the terminal time."""
+		return self._request('POST', f'/api/v1/approval/{request.approval_id}/cancel', ApprovalResponse)
+
 	def list_approvals(self, request: ApprovalListRequest) -> ApprovalListResponse:
 		"""Fetch one page. Time ranges include their start and exclude their end.
 
@@ -247,6 +252,10 @@ class AsyncApprovalCenterClient:
 
 	async def get_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
 		return await self._request('GET', f'/api/v1/approval/{request.approval_id}', ApprovalResponse)
+
+	async def cancel_approval(self, request: ApprovalIdRequest) -> ApprovalResponse:
+		"""Cancel a pending approval. Repeated cancellation preserves the terminal time."""
+		return await self._request('POST', f'/api/v1/approval/{request.approval_id}/cancel', ApprovalResponse)
 
 	async def list_approvals(self, request: ApprovalListRequest) -> ApprovalListResponse:
 		"""Fetch one page. Time ranges include their start and exclude their end.

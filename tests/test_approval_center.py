@@ -242,6 +242,130 @@ class ApprovalTests(ApprovalFixture):
 		self.assertEqual(updated.decided_at, 1000)
 		self.assertEqual(updated.expires_at, 1100)
 
+	async def test_cancel_lifecycle_and_card_sync(self) -> None:
+		approval = await self.create(reference_key='survival/Steve')
+		await self.maintenance.run_once()
+		self.clock.seconds = 1001
+		cancelled = await self.service.cancel(self.owner, approval.approval_id)
+		self.assertEqual(cancelled.status, ApprovalStatus.CANCELLED)
+		self.assertIsNone(cancelled.reviewer_id)
+		self.assertEqual(cancelled.decided_at, 1001)
+		self.assertEqual(cancelled.updated_at, 1001)
+		self.assertEqual(cancelled.expires_at, approval.expires_at)
+		self.assertEqual(cancelled.reference_key, approval.reference_key)
+		self.assertEqual(cancelled.data, approval.data)
+		self.assertEqual(cancelled.data_version, approval.data_version)
+		snapshot = (await self.service.pending_messages())[0]
+		card = render_card(snapshot, 'PrimeBackup')
+		self.assertIn('已取消', card.footer.text)
+		self.assertIn('取消时间：1001', card.footer.text)
+		self.assertTrue(all(child.item.disabled for child in card_view(approval.approval_id, cancelled.status).children))
+		await self.maintenance.run_once()
+		self.assertEqual(self.publisher.snapshots[-1].approval.status, ApprovalStatus.CANCELLED)
+		self.assertEqual(await self.service.pending_messages(), [])
+		self.clock.seconds = 1002
+		self.assertEqual(await self.service.cancel(self.owner, approval.approval_id), cancelled)
+		self.assertEqual(await self.service.pending_messages(), [])
+		self.clock.seconds = 1110
+		updated = await self.service.replace_data(self.owner, approval.approval_id, b'done', None)
+		self.assertEqual(updated.status, ApprovalStatus.CANCELLED)
+		self.assertEqual(updated.decided_at, 1001)
+		self.assertEqual(await self.service.cancel(self.owner, approval.approval_id), updated)
+		self.assertEqual(await self.service.pending_messages(), [])
+		await self.storage.close()
+		self.storage = await Storage.open(self.path)
+		self.service.storage = self.storage
+		self.assertEqual(await self.service.get(self.owner, approval.approval_id), updated)
+		self.clock.seconds = 1120
+		await self.assert_error(404, self.service.cancel(self.owner, approval.approval_id))
+		self.assertEqual(await self.service.cleanup(), 1)
+
+	async def test_cancel_permissions_and_logging(self) -> None:
+		approval = await self.create()
+		await self.assert_error(404, self.service.cancel(self.other, approval.approval_id))
+		await self.assert_error(404, self.service.cancel(self.owner, 999))
+		self.assertEqual((await self.service.get(self.owner, approval.approval_id)).status, ApprovalStatus.PENDING)
+		with self.assertLogs('approval_center.approval', level=logging.INFO) as captured:
+			cancelled = await self.service.cancel(self.admin, approval.approval_id)
+		self.assertEqual(cancelled.client_id, 'owner')
+		self.assertIn('actor_client_id=admin', captured.output[0])
+		self.assertIn('owner_client_id=owner', captured.output[0])
+		await self.maintenance.run_once()
+		self.assertEqual(self.publisher.snapshots[-1].approval.status, ApprovalStatus.CANCELLED)
+		self.assertEqual(await self.service.pending_messages(), [])
+
+	async def test_cancel_terminal_conflicts_and_timeout_commit(self) -> None:
+		for status in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):
+			approval = await self.create()
+			await self.maintenance.run_once()
+			await self.service.decide(approval.approval_id, status, '3', '1', '2', str(100 + approval.approval_id))
+			before = await self.service.get(self.owner, approval.approval_id)
+			await self.assert_error(409, self.service.cancel(self.owner, approval.approval_id))
+			self.assertEqual(await self.service.get(self.owner, approval.approval_id), before)
+		approval = await self.create()
+		await self.maintenance.run_once()
+		self.clock.seconds = 1100
+		await self.assert_error(409, self.service.cancel(self.owner, approval.approval_id))
+		async with self.storage.transaction() as transaction:
+			stored = await transaction.get(approval.approval_id)
+			self.assertEqual(stored.status, ApprovalStatus.TIMED_OUT)
+			self.assertEqual(stored.decided_at, 1100)
+			self.assertTrue((await transaction.get_link(approval.approval_id)).needs_message_sync)
+		await self.assert_error(409, self.service.cancel(self.owner, approval.approval_id))
+
+	async def test_cancel_rechecks_deadline_after_lookup(self) -> None:
+		approval = await self.create()
+		self.clock.seconds = 1099
+		from approval_center.storage import Transaction
+		get = Transaction.get
+
+		async def delayed_get(transaction: Transaction, approval_id: int):
+			stored = await get(transaction, approval_id)
+			self.clock.seconds = 1100
+			return stored
+
+		with patch.object(Transaction, 'get', delayed_get):
+			await self.assert_error(409, self.service.cancel(self.owner, approval.approval_id))
+		async with self.storage.transaction() as transaction:
+			self.assertEqual((await transaction.get(approval.approval_id)).status, ApprovalStatus.TIMED_OUT)
+
+	async def test_cancel_and_decide_follow_transaction_order(self) -> None:
+		first = await self.create()
+		await self.maintenance.run_once()
+		results = await asyncio.gather(
+			self.service.cancel(self.owner, first.approval_id),
+			self.service.decide(first.approval_id, ApprovalStatus.APPROVED, '3', '1', '2', '101'),
+		)
+		self.assertEqual(results[0].status, ApprovalStatus.CANCELLED)
+		self.assertFalse(results[1].accepted)
+		self.assertEqual(results[1].approval.status, ApprovalStatus.CANCELLED)
+		second = await self.create()
+		await self.maintenance.run_once()
+		results = await asyncio.gather(
+			self.service.decide(second.approval_id, ApprovalStatus.APPROVED, '3', '1', '2', '102'),
+			self.service.cancel(self.owner, second.approval_id), return_exceptions=True,
+		)
+		self.assertTrue(results[0].accepted)
+		self.assertIsInstance(results[1], ApprovalError)
+		self.assertEqual(results[1].status_code, 409)
+		self.assertEqual((await self.service.get(self.owner, second.approval_id)).status, ApprovalStatus.APPROVED)
+
+	async def test_cancel_during_message_sync(self) -> None:
+		approval = await self.create()
+
+		async def cancel_while_sending() -> None:
+			await self.service.cancel(self.owner, approval.approval_id)
+
+		self.publisher.during_sync = cancel_while_sending
+		await self.maintenance.run_once()
+		snapshot = (await self.service.pending_messages())[0]
+		self.assertEqual(snapshot.link.message_id, '101')
+		self.assertEqual(snapshot.approval.status, ApprovalStatus.CANCELLED)
+		self.publisher.during_sync = None
+		await self.maintenance.run_once()
+		self.assertEqual(self.publisher.snapshots[-1].approval.status, ApprovalStatus.CANCELLED)
+		self.assertEqual(await self.service.pending_messages(), [])
+
 	async def test_message_binding(self) -> None:
 		await self.create()
 		await self.maintenance.run_once()
@@ -512,6 +636,34 @@ class ApiTests(ApprovalFixture):
 				'content': {'title': 'Approval'}, 'expires_at': 1100, 'reference_key': key,
 			})
 			self.assertEqual(response.status_code, 422)
+
+	async def test_api_cancel_permissions_and_results(self) -> None:
+		approval = await self.create(reference_key='survival/Steve')
+		path = f'/api/v1/approval/{approval.approval_id}/cancel'
+		self.assertEqual((await self.http.post(path, auth=None)).status_code, 401)
+		self.assertEqual((await self.http.post(path, auth=('other', 'secret'))).status_code, 404)
+		self.assertEqual((await self.http.post('/api/v1/approval/999/cancel')).status_code, 404)
+		self.assertEqual((await self.http.post('/api/v1/approval/0/cancel')).status_code, 422)
+		self.clock.seconds = 1001
+		response = await self.http.post(path, auth=('admin', 'secret'))
+		self.assertEqual(response.status_code, 200, response.text)
+		body = response.json()
+		self.assertEqual(body['status'], 'cancelled')
+		self.assertEqual(body['decision'], {'reviewer_id': None, 'decided_at': 1001})
+		self.assertEqual(body['client_id'], 'owner')
+		self.assertEqual(body['reference_key'], 'survival/Steve')
+		self.assertEqual(body['data'], 'AP8=')
+		self.clock.seconds = 1002
+		self.assertEqual((await self.http.post(path)).json(), body)
+		response = await self.http.get('/api/v1/approval', params={'status': 'cancelled'})
+		self.assertEqual(response.json()['items'], [body])
+		await self.create()
+		self.clock.seconds = 1100
+		response = await self.http.post('/api/v1/approval/2/cancel')
+		self.assertEqual(response.status_code, 409)
+		self.assertEqual(response.json()['code'], 'approval_not_pending')
+		async with self.storage.transaction() as transaction:
+			self.assertEqual((await transaction.get(2)).status, ApprovalStatus.TIMED_OUT)
 
 	async def test_api_invalid_inputs_and_health(self) -> None:
 		for data in ('!!!', '汉字', 123, None):

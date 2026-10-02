@@ -21,6 +21,7 @@ class ApprovalStatus(StrEnum):
 	APPROVED = 'approved'
 	REJECTED = 'rejected'
 	TIMED_OUT = 'timed_out'
+	CANCELLED = 'cancelled'
 
 
 class StoredModel(BaseModel):
@@ -161,6 +162,24 @@ class ApprovalService:
 	async def get(self, client: ClientConfig, approval_id: int) -> Approval:
 		async with self.storage.transaction() as transaction:
 			return await self._get(transaction, approval_id, client, self.now())
+
+	async def cancel(self, client: ClientConfig, approval_id: int) -> Approval:
+		async with self.storage.transaction() as transaction:
+			approval = await self._get(transaction, approval_id, client, self.now())
+			now = self.now()
+			approval = await self._expire(transaction, approval, now)
+			changed = approval.status == ApprovalStatus.PENDING
+			if changed:
+				await transaction.set_decision(approval_id, ApprovalStatus.CANCELLED, None, now, now)
+				updated = await transaction.get(approval_id)
+				assert updated is not None
+				approval = updated
+		# Commit any timeout before reporting that cancellation is no longer possible.
+		if approval.status != ApprovalStatus.CANCELLED:
+			raise ApprovalError('approval_not_pending', 'Only pending approvals may be cancelled', 409)
+		if changed:
+			LOGGER.info('Approval cancelled approval_id=%s actor_client_id=%s owner_client_id=%s', approval_id, client.client_id, approval.client_id)
+		return approval
 
 	async def list_approvals(self, client: ClientConfig, filters: ApprovalFilter) -> list[Approval]:
 		if filters.all_clients and not client.is_admin:

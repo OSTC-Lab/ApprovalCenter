@@ -190,6 +190,10 @@ def install_api(app: FastAPI, config: Config, service_provider: Callable[[], App
 	async def get_approval(approval_id: ApprovalId, client: Client) -> ApprovalResponse:
 		return ApprovalResponse.of(await service_provider().get(client, approval_id))
 
+	@app.post('/api/v1/approval/{approval_id}/cancel', response_model=ApprovalResponse)
+	async def cancel_approval(approval_id: ApprovalId, client: Client) -> ApprovalResponse:
+		return ApprovalResponse.of(await service_provider().cancel(client, approval_id))
+
 	@app.get('/api/v1/approval-data/{approval_id}', response_model=ApprovalDataResponse)
 	async def get_data(approval_id: ApprovalId, client: Client) -> ApprovalDataResponse:
 		approval = await service_provider().get(client, approval_id)

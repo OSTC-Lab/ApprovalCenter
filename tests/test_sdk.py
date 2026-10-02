@@ -106,6 +106,21 @@ class SdkTests(unittest.TestCase):
 				self.assertEqual(caught.exception.response.json()['message'], 'details')
 		self.assertEqual(len(self.requests), 6)
 
+	def test_sync_cancel_protocol(self) -> None:
+		cancelled = self.approval.model_copy(update={
+			'status': ApprovalStatus.CANCELLED, 'decision': api.DecisionInfo(reviewer_id=None, decided_at=1001), 'updated_at': 1001,
+		})
+		self.responses = [httpx.Response(200, content=cancelled.model_dump_json())]
+		with self.make_client() as client:
+			response = client.cancel_approval(sdk.ApprovalIdRequest(approval_id=1))
+		self.assertIs(response.status, sdk.ApprovalStatus.CANCELLED)
+		self.assertEqual(response.decision.decided_at, 1001)
+		self.assertIsNone(response.decision.reviewer_id)
+		self.assertEqual(response.data, b'\x00\xff')
+		self.assertEqual(self.requests[0].method, 'POST')
+		self.assertEqual(self.requests[0].url.path, '/prefix/api/v1/approval/1/cancel')
+		self.assertEqual(self.requests[0].content, b'')
+
 	def test_transport_error_is_not_wrapped_or_retried(self) -> None:
 		error = httpx.ReadTimeout('Simulated timeout')
 
@@ -268,6 +283,35 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
 			self.assertEqual((await client.list_approvals(sdk.ApprovalListRequest(reference_key='null'))).items, [])
 			await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=second.approval_id, data=b'updated'))
 			self.assertEqual((await client.get_approval(sdk.ApprovalIdRequest(approval_id=second.approval_id))).reference_key, key)
+
+	async def test_actual_api_cancel(self) -> None:
+		async with self.make_client() as client:
+			created = await client.create_approval(sdk.CreateApprovalRequest(
+				content=sdk.ApprovalContent(title='Approval'), expires_at=1100, data=b'\xff', reference_key='survival/Steve',
+			))
+			request = sdk.ApprovalIdRequest(approval_id=created.approval_id)
+			async with self.make_client('other') as other:
+				with self.assertRaises(httpx.HTTPStatusError) as caught:
+					await other.cancel_approval(request)
+				self.assertEqual(caught.exception.response.status_code, 404)
+			self.now = 1001
+			cancelled = await client.cancel_approval(request)
+			self.assertIs(cancelled.status, sdk.ApprovalStatus.CANCELLED)
+			self.assertEqual(cancelled.decision.decided_at, 1001)
+			self.assertIsNone(cancelled.decision.reviewer_id)
+			self.assertEqual(cancelled.data, b'\xff')
+			self.assertEqual(cancelled.reference_key, 'survival/Steve')
+			self.now = 1002
+			self.assertEqual(await client.cancel_approval(request), cancelled)
+			page = await client.list_approvals(sdk.ApprovalListRequest(status=sdk.ApprovalStatus.CANCELLED))
+			self.assertEqual(page.items, [cancelled])
+			self.assertEqual((await client.set_approval_data(sdk.ReplaceDataRequest(approval_id=created.approval_id, data=b'new'))).version, 1)
+			pending = await client.create_approval(sdk.CreateApprovalRequest(content=sdk.ApprovalContent(title='Timeout'), expires_at=1100))
+			self.now = 1100
+			with self.assertRaises(httpx.HTTPStatusError) as caught:
+				await client.cancel_approval(sdk.ApprovalIdRequest(approval_id=pending.approval_id))
+			self.assertEqual(caught.exception.response.status_code, 409)
+			self.assertEqual(caught.exception.response.json()['code'], 'approval_not_pending')
 
 	async def test_async_transport_and_response_errors(self) -> None:
 		error = httpx.ConnectError('Simulated connection failure')

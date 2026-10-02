@@ -19,3 +19,6 @@ Both use the service base URL, `client_id`, and `client_secret`
 Set `CreateApprovalRequest.reference_key` to associate approvals with a business object.
 Use the same string in `ApprovalListRequest.reference_key` for exact-match filtering.
 Leaving the filter as `None` includes approvals with and without a key.
+
+`cancel_approval` accepts an `ApprovalIdRequest` and returns the complete approval.
+Repeating cancellation of a cancelled approval preserves its cancellation time.

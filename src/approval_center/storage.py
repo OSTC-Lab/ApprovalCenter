@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS approval (
 	client_id TEXT NOT NULL,
 	reference_key TEXT,
 	content TEXT NOT NULL,
-	status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timed_out')),
+	status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timed_out', 'cancelled')),
 	created_at INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS approval (
 		(status = 'pending' AND reviewer_id IS NULL AND decided_at IS NULL)
 		OR (status IN ('approved', 'rejected') AND reviewer_id IS NOT NULL AND decided_at IS NOT NULL)
 		OR (status = 'timed_out' AND reviewer_id IS NULL AND decided_at IS NOT NULL AND decided_at = expires_at)
+		OR (status = 'cancelled' AND reviewer_id IS NULL AND decided_at IS NOT NULL)
 	)
 );
 CREATE TABLE IF NOT EXISTS approval_data (
